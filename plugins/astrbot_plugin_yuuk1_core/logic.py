@@ -131,6 +131,7 @@ class SlidingWindowRateLimiter:
         self.window_seconds = _positive_int(window_seconds, 60, 86_400)
         self.request_limit = _positive_int(request_limit, 5, 10_000)
         self._hits: dict[str, deque[float]] = {}
+        self._next_cleanup_at = 0.0
 
     def allow(self, scope: str, now: float | None = None) -> tuple[bool, float]:
         """Record a hit; return (allowed, retry_after_seconds)."""
@@ -142,20 +143,23 @@ class SlidingWindowRateLimiter:
 
     def _check(self, scope: str, timestamp: float) -> tuple[bool, float]:
         """Inspect capacity without consuming it, for compound policies."""
-        hits = self._hits.get(scope)
-        if hits is None:
-            return True, 0.0
         cutoff = timestamp - self.window_seconds
-        while hits and hits[0] <= cutoff:
-            hits.popleft()
-        if len(self._hits) > 256:
+        if len(self._hits) > 256 and timestamp >= self._next_cleanup_at:
             for existing_scope, existing_hits in list(self._hits.items()):
-                if existing_scope == scope:
-                    continue
                 while existing_hits and existing_hits[0] <= cutoff:
                     existing_hits.popleft()
                 if not existing_hits:
                     self._hits.pop(existing_scope, None)
+            self._next_cleanup_at = timestamp + min(self.window_seconds, 60)
+
+        hits = self._hits.get(scope)
+        if hits is None:
+            return True, 0.0
+        while hits and hits[0] <= cutoff:
+            hits.popleft()
+        if not hits:
+            self._hits.pop(scope, None)
+            return True, 0.0
 
         if len(hits) >= self.request_limit:
             retry_after = max(0.0, hits[0] + self.window_seconds - timestamp)

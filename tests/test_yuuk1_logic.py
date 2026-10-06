@@ -101,6 +101,13 @@ class RateLimiterTests(unittest.TestCase):
         self.assertEqual(limiter.allow("group-a", now=5), (True, 0.0))
         self.assertEqual(limiter.allow("group-b", now=5), (True, 0.0))
 
+    def test_new_scopes_prune_expired_old_scopes(self) -> None:
+        limiter = SlidingWindowRateLimiter(window_seconds=10, request_limit=1)
+        for index in range(257):
+            self.assertEqual(limiter.allow(f"user-{index}", now=0), (True, 0.0))
+        self.assertEqual(limiter.allow("new-user", now=11), (True, 0.0))
+        self.assertEqual(len(limiter._hits), 1)
+
 
 class TwoLevelRateLimiterTests(unittest.TestCase):
     def test_same_user_burst_does_not_exhaust_group(self) -> None:

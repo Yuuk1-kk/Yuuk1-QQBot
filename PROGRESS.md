@@ -11,7 +11,7 @@ The repository is ready for manual runtime integration. The baseline commit is `
 - Replaced both mutable `latest` images with reviewed official stable release tags and immutable multi-architecture digests: AstrBot v4.28.2 and NapCat-Docker v4.18.33. Recorded sources, upgrade and rollback procedure in `docs/UPSTREAM.md` and added a read-only upstream checker that classifies beta from tag names as well as release metadata.
 - Confirmed in AstrBot v4.28.2 source that its Star loader scans `/AstrBot/data/plugins/<name>/main.py`. Compose mounts the repository Yuuk1 Core source at exactly that path, read-only; a container restart reloads edited source. The plugin now emits `Yuuk1 Core ready` after initialization so `doctor.ps1` can check real runtime evidence once Docker is available.
 - QQ group allowlist remains fail-closed; private chats are now disabled by default. `/yuuk1 reset` is administrator-only and uses AstrBot ConversationManager. Status reports no provider ID, model string or credential. The plugin only supplements AstrBot's native persona and conversation pipeline.
-- Added atomic in-memory per-user and per-group request limits. Defaults are 3 admitted LLM requests per QQ user across chats and 15 per group, each over 60 seconds. A request denied by one bucket does not consume the other.
+- Added atomic in-memory per-user and per-group request limits. Defaults are 3 admitted LLM requests per QQ user across chats and 15 per group, each over 60 seconds. A request denied by one bucket does not consume the other; expired scopes are pruned during later traffic.
 - Kept WebUI host binds on `127.0.0.1`, OneBot 6199 unpublished, a two-service bridge, persistent narrow mounts and `no-new-privileges` for AstrBot. NapCat `MODE=astrbot` rewrites its empty-token OneBot template on every start, so token auto-configuration was not added without a reliable persistent two-sided mechanism.
 - Bootstrap prepares the ignored local `.env`, data and backup directories before checking Docker. Doctor now distinguishes `[PASS]`, `[WARN]`, `[FAIL]` and `[MANUAL]` and checks container, WebUI, plugin-ready and OneBot log evidence when runtime is available.
 - Added a stopped-service backup script for AstrBot data and NapCat config, excluding logs/cache/temp; optional `-IncludeQQSession` also saves the QQ login state. `backups/` is ignored by Git.
@@ -19,7 +19,7 @@ The repository is ready for manual runtime integration. The baseline commit is `
 
 ## Verification performed locally
 
-- **PASS:** `python -m pytest -q`: 15 tests.
+- **PASS:** `python -m pytest -q`: 16 tests.
 - **PASS:** `python -m ruff check plugins tests` and `python -m compileall -q plugins tests`.
 - **PASS:** PowerShell parser for every `scripts/*.ps1` file.
 - **PASS:** `git diff --check`, YAML/JSON and Compose structure checks, Star metadata/schema checks, tracked-file secret-pattern scan, and Git ignore checks.
