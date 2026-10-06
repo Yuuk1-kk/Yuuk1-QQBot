@@ -1,0 +1,37 @@
+# Credentials and runtime data
+.env
+.env.*
+!.env.example
+/data/
+**/napcat/config/
+**/napcat/qq/
+*.session
+*.cookie
+*.cookies
+*.sqlite
+*.sqlite3
+*.db
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# IDE and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Build output
+dist/
+build/
+*.egg-info/

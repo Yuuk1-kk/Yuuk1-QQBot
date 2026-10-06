@@ -1,0 +1,36 @@
+services:
+  astrbot:
+    image: ${ASTRBOT_IMAGE:-soulter/astrbot:latest}
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+    ports:
+      - "${ASTRBOT_WEBUI_BIND:-127.0.0.1}:${ASTRBOT_WEBUI_PORT:-6185}:6185"
+    volumes:
+      - ./data/astrbot:/AstrBot/data
+      - ./plugins/astrbot_plugin_yuuk1_core:/AstrBot/data/plugins/astrbot_plugin_yuuk1_core:ro
+    networks:
+      - bot
+
+  napcat:
+    image: ${NAPCAT_IMAGE:-mlikiowa/napcat-docker:latest}
+    restart: unless-stopped
+    environment:
+      MODE: astrbot
+      TZ: ${TZ:-Asia/Shanghai}
+      NAPCAT_UID: ${NAPCAT_UID:-1000}
+      NAPCAT_GID: ${NAPCAT_GID:-1000}
+    ports:
+      - "${NAPCAT_WEBUI_BIND:-127.0.0.1}:${NAPCAT_WEBUI_PORT:-6099}:6099"
+    volumes:
+      - ./data/napcat/config:/app/napcat/config
+      - ./data/napcat/qq:/app/.config/QQ
+    networks:
+      - bot
+
+networks:
+  bot:
+    driver: bridge

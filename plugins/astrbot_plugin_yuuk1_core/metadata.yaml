@@ -1,0 +1,9 @@
+name: astrbot_plugin_yuuk1_core
+author: Yuuk1
+display_name: Yuuk1 Core
+desc: Yuuk1-QQBot 项目级命令、群白名单、人格补充与限流。
+short_desc: Yuuk1-QQBot 的核心 AstrBot Star 插件。
+version: 0.1.0
+astrbot_version: ">=4.28.0,<5"
+support_platforms:
+  - aiocqhttp
