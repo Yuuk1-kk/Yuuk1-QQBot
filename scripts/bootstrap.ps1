@@ -5,52 +5,53 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location -LiteralPath $repoRoot
 
-if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
-    throw '未找到 Docker CLI。请先安装并启动 Docker Desktop。'
-}
-docker compose version *> $null
-if ($LASTEXITCODE -ne 0) {
-    throw '当前 Docker 未提供 Compose v2。请更新 Docker Desktop。'
-}
-
 $envPath = Join-Path $repoRoot '.env'
 if (-not (Test-Path -LiteralPath $envPath)) {
     Copy-Item -LiteralPath (Join-Path $repoRoot '.env.example') -Destination $envPath
-    Write-Host '已从 .env.example 创建本地 .env（其中只有占位符，不含真实 Secret）。'
+    Write-Host '[PASS] 已创建本地 .env，占位值尚需用户填写。'
 } else {
-    Write-Host '已找到本地 .env；未读取或显示其中的 Secret。'
+    Write-Host '[PASS] 已保留现有 .env。'
 }
 
 @(
     'data/astrbot/plugins',
     'data/astrbot/config',
     'data/napcat/config',
-    'data/napcat/qq'
+    'data/napcat/qq',
+    'backups'
 ) | ForEach-Object {
     New-Item -ItemType Directory -Force -Path (Join-Path $repoRoot $_) | Out-Null
 }
+Write-Host '[PASS] 本地数据和备份目录已就绪。'
 
+$keyLine = Get-Content -LiteralPath $envPath | Where-Object { $_ -match '^\s*DEEPSEEK_API_KEY\s*=' } | Select-Object -Last 1
 $keyConfigured = $false
-$keyValue = [Environment]::GetEnvironmentVariable('DEEPSEEK_API_KEY')
-if ($null -eq $keyValue) {
-    $keyLine = Get-Content -LiteralPath $envPath | Where-Object { $_ -match '^\s*DEEPSEEK_API_KEY\s*=' } | Select-Object -Last 1
-    if ($keyLine -match '^\s*DEEPSEEK_API_KEY\s*=(.*)$') {
-        $keyValue = $Matches[1].Trim().Trim('"').Trim("'")
-    }
-}
-if ($keyValue) {
-    $keyConfigured = $keyValue.Length -gt 0 -and $keyValue -notmatch '^(replace-me|your[_-].*|<.*>)$'
+if ($keyLine -match '^\s*DEEPSEEK_API_KEY\s*=(.*)$') {
+    $keyValue = $Matches[1].Trim().Trim('"').Trim("'")
+    $keyConfigured = [bool]($keyValue -and $keyValue -notmatch '^(replace-me|your[_-].*|<.*>)$')
 }
 if ($keyConfigured) {
-    Write-Host 'DEEPSEEK_API_KEY 已配置（值已隐藏）。'
+    Write-Host '[PASS] DEEPSEEK_API_KEY 已设置（内容不显示）。'
 } else {
-    Write-Warning 'DEEPSEEK_API_KEY 尚未设置。请在 .env 中填入真实密钥；当前不会生成密钥。'
+    Write-Host '[MANUAL] 在忽略的 .env 中填写真实 DEEPSEEK_API_KEY。'
 }
 
-docker info *> $null
-if ($LASTEXITCODE -eq 0) {
-    Write-Host 'Docker Engine 正在运行。'
-} else {
-    Write-Warning 'Docker CLI 和 Compose 已就绪，但 Docker Engine 当前未运行。'
+if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+    Write-Error '[FAIL] 未找到 Docker CLI。请安装 Docker Desktop、启用 Linux containers，重新打开 PowerShell 后运行本脚本。未自动安装系统软件。' -ErrorAction Continue
+    exit 2
 }
-Write-Host '本地数据目录已就绪。下一步运行 .\scripts\start.ps1。'
+Write-Host '[PASS] Docker CLI 已安装。'
+
+docker compose version *> $null
+if ($LASTEXITCODE -ne 0) {
+    Write-Error '[FAIL] 当前 Docker 未提供 Compose v2。请更新 Docker Desktop。' -ErrorAction Continue
+    exit 3
+}
+Write-Host '[PASS] Docker Compose v2 可用。'
+
+docker info *> $null
+if ($LASTEXITCODE -ne 0) {
+    Write-Error '[FAIL] Docker Engine 未运行。请启动 Docker Desktop 并确认已切换到 Linux containers，然后重试。' -ErrorAction Continue
+    exit 4
+}
+Write-Host '[PASS] Docker Engine 正在运行。可运行 .\scripts\start.ps1。'

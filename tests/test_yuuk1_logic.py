@@ -4,8 +4,10 @@ import unittest
 
 from plugins.astrbot_plugin_yuuk1_core.logic import (
     SlidingWindowRateLimiter,
+    TwoLevelRateLimiter,
     is_configured_admin,
     is_group_allowed,
+    is_qq_context_allowed,
     normalize_config,
     normalize_ids,
 )
@@ -26,9 +28,14 @@ class NormalizeIdsTests(unittest.TestCase):
 
 
 class AccessPolicyTests(unittest.TestCase):
-    def test_empty_allowlist_fails_closed_for_groups_but_not_private_chat(self) -> None:
+    def test_empty_allowlist_fails_closed_for_groups_and_private_chat(self) -> None:
         self.assertFalse(is_group_allowed("12345", frozenset()))
-        self.assertTrue(is_group_allowed("", frozenset()))
+        self.assertFalse(is_group_allowed("", frozenset()))
+        self.assertFalse(is_qq_context_allowed("", frozenset(), False))
+
+    def test_private_chat_requires_explicit_opt_in(self) -> None:
+        self.assertTrue(is_qq_context_allowed("", frozenset(), True))
+        self.assertFalse(is_qq_context_allowed("54321", frozenset({"12345"}), True))
 
     def test_allowlist_and_admin_checks_compare_normalized_ids(self) -> None:
         self.assertTrue(is_group_allowed("12345", frozenset({"12345"})))
@@ -42,29 +49,41 @@ class ConfigNormalizationTests(unittest.TestCase):
         settings = normalize_config({})
         self.assertEqual(settings.bot_name, "Yuuk1")
         self.assertEqual(settings.allowed_groups, frozenset())
+        self.assertFalse(settings.allow_private_chat)
         self.assertTrue(settings.rate_limit_enabled)
         self.assertEqual(settings.rate_limit_window, 60)
-        self.assertEqual(settings.rate_limit_requests, 5)
+        self.assertEqual(settings.rate_limit_requests, 15)
+        self.assertEqual(settings.user_rate_limit_window, 60)
+        self.assertEqual(settings.user_rate_limit_requests, 3)
 
     def test_malformed_values_fall_back_and_limits_are_bounded(self) -> None:
         settings = normalize_config(
             {
                 "bot_name": "  ",
                 "allowed_groups": "12345,67890",
+                "allow_private_chat": "invalid",
                 "admin_users": [12345, True],
                 "system_prompt": None,
                 "rate_limit_enabled": "false",
                 "rate_limit_window": -4,
                 "rate_limit_requests": 99_999,
+                "user_rate_limit_window": 0,
+                "user_rate_limit_requests": 99_999,
             }
         )
         self.assertEqual(settings.bot_name, "Yuuk1")
         self.assertEqual(settings.allowed_groups, frozenset({"12345", "67890"}))
+        self.assertFalse(settings.allow_private_chat)
         self.assertEqual(settings.admin_users, frozenset({"12345"}))
         self.assertEqual(settings.system_prompt, "")
         self.assertFalse(settings.rate_limit_enabled)
         self.assertEqual(settings.rate_limit_window, 1)
         self.assertEqual(settings.rate_limit_requests, 10_000)
+        self.assertEqual(settings.user_rate_limit_window, 1)
+        self.assertEqual(settings.user_rate_limit_requests, 10_000)
+
+    def test_private_chat_can_be_enabled_explicitly(self) -> None:
+        self.assertTrue(normalize_config({"allow_private_chat": True}).allow_private_chat)
 
 
 class RateLimiterTests(unittest.TestCase):
@@ -81,6 +100,45 @@ class RateLimiterTests(unittest.TestCase):
         limiter = SlidingWindowRateLimiter(window_seconds=60, request_limit=1)
         self.assertEqual(limiter.allow("group-a", now=5), (True, 0.0))
         self.assertEqual(limiter.allow("group-b", now=5), (True, 0.0))
+
+
+class TwoLevelRateLimiterTests(unittest.TestCase):
+    def test_same_user_burst_does_not_exhaust_group(self) -> None:
+        limiter = TwoLevelRateLimiter(60, 2, 60, 5)
+        self.assertEqual(limiter.allow("user-a", "group-a", now=0), (True, 0.0))
+        self.assertEqual(limiter.allow("user-a", "group-a", now=1), (True, 0.0))
+        self.assertEqual(limiter.allow("user-a", "group-a", now=2), (False, 58.0))
+        self.assertEqual(limiter.allow("user-b", "group-a", now=2), (True, 0.0))
+        self.assertEqual(limiter.allow("user-c", "group-a", now=2), (True, 0.0))
+        self.assertEqual(limiter.allow("user-d", "group-a", now=2), (True, 0.0))
+
+    def test_group_limit_rejects_different_users_without_charging_user(self) -> None:
+        limiter = TwoLevelRateLimiter(60, 3, 60, 2)
+        self.assertEqual(limiter.allow("user-a", "group-a", now=0), (True, 0.0))
+        self.assertEqual(limiter.allow("user-b", "group-a", now=1), (True, 0.0))
+        self.assertEqual(limiter.allow("user-c", "group-a", now=2), (False, 58.0))
+        self.assertEqual(limiter.allow("user-c", "group-b", now=2), (True, 0.0))
+
+    def test_user_limit_applies_across_groups_and_private_chat(self) -> None:
+        limiter = TwoLevelRateLimiter(60, 2, 60, 10)
+        self.assertEqual(limiter.allow("user-a", "group-a", now=0), (True, 0.0))
+        self.assertEqual(limiter.allow("user-a", "", now=1), (True, 0.0))
+        self.assertEqual(limiter.allow("user-a", "group-b", now=2), (False, 58.0))
+        self.assertEqual(limiter.allow("user-b", "group-b", now=2), (True, 0.0))
+
+    def test_user_and_group_windows_expire_independently(self) -> None:
+        limiter = TwoLevelRateLimiter(10, 1, 20, 2)
+        self.assertEqual(limiter.allow("user-a", "group-a", now=0), (True, 0.0))
+        self.assertEqual(limiter.allow("user-a", "group-a", now=1), (False, 9.0))
+        self.assertEqual(limiter.allow("user-b", "group-a", now=1), (True, 0.0))
+        self.assertEqual(limiter.allow("user-c", "group-a", now=10), (False, 10.0))
+        self.assertEqual(limiter.allow("user-a", "group-b", now=10), (True, 0.0))
+        self.assertEqual(limiter.allow("user-c", "group-a", now=20), (True, 0.0))
+
+    def test_missing_sender_fails_closed_without_charging_group(self) -> None:
+        limiter = TwoLevelRateLimiter(60, 1, 60, 1)
+        self.assertEqual(limiter.allow("", "group-a", now=0), (False, 0.0))
+        self.assertEqual(limiter.allow("user-a", "group-a", now=0), (True, 0.0))
 
 
 if __name__ == "__main__":

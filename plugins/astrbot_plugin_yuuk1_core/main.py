@@ -13,9 +13,9 @@ from astrbot.api.star import Context, Star
 
 from .logic import (
     CoreSettings,
-    SlidingWindowRateLimiter,
+    TwoLevelRateLimiter,
     is_configured_admin,
-    is_group_allowed,
+    is_qq_context_allowed,
     normalize_config,
 )
 
@@ -37,9 +37,10 @@ class Yuuk1CommandAllowlistFilter(filter.CustomFilter):
         del cfg
         if event.get_platform_name() != "aiocqhttp":
             return True
-        return _ACTIVE_SETTINGS is not None and is_group_allowed(
+        return _ACTIVE_SETTINGS is not None and is_qq_context_allowed(
             event.get_group_id(),
             _ACTIVE_SETTINGS.allowed_groups,
+            _ACTIVE_SETTINGS.allow_private_chat,
         )
 
 
@@ -51,10 +52,16 @@ class Yuuk1CorePlugin(Star):
         super().__init__(context)
         self.settings: CoreSettings = normalize_config(config)
         _ACTIVE_SETTINGS = self.settings
-        self.rate_limiter = SlidingWindowRateLimiter(
+        self.rate_limiter = TwoLevelRateLimiter(
+            self.settings.user_rate_limit_window,
+            self.settings.user_rate_limit_requests,
             self.settings.rate_limit_window,
             self.settings.rate_limit_requests,
         )
+
+    async def initialize(self) -> None:
+        """Expose an unambiguous post-initialization signal for runtime checks."""
+        logger.info("Yuuk1 Core ready")
 
     @staticmethod
     def _is_qq(event: AstrMessageEvent) -> bool:
@@ -63,55 +70,51 @@ class Yuuk1CorePlugin(Star):
     def _is_allowed_context(self, event: AstrMessageEvent) -> bool:
         if not self._is_qq(event):
             return False
-        return is_group_allowed(event.get_group_id(), self.settings.allowed_groups)
+        return is_qq_context_allowed(
+            event.get_group_id(),
+            self.settings.allowed_groups,
+            self.settings.allow_private_chat,
+        )
 
     def _is_admin(self, event: AstrMessageEvent) -> bool:
         return is_configured_admin(event.get_sender_id(), self.settings.admin_users)
 
     @filter.on_waiting_llm_request()
-    async def guard_group_request(self, event: AstrMessageEvent) -> None:
-        """Apply group policy before provider selection and auxiliary model work."""
+    async def guard_qq_request(self, event: AstrMessageEvent) -> None:
+        """Apply QQ policy before provider selection and auxiliary model work."""
         if not self._is_qq(event):
             return
 
         group_id = event.get_group_id()
         try:
-            if group_id and not is_group_allowed(group_id, self.settings.allowed_groups):
-                logger.debug("Yuuk1 skipped LLM request from non-allowlisted group.")
+            if not self._is_allowed_context(event):
+                logger.debug("Yuuk1 skipped LLM request from a disabled QQ context.")
                 event.stop_event()
                 return
 
-            if group_id and self.settings.rate_limit_enabled:
-                allowed, retry_after = self.rate_limiter.allow(group_id)
+            if self.settings.rate_limit_enabled:
+                allowed, retry_after = self.rate_limiter.allow(
+                    event.get_sender_id(), group_id
+                )
                 if not allowed:
                     event.stop_event()
-                    try:
-                        await event.send(
-                            event.plain_result("群聊请求较多，请稍等片刻后再试。")
-                        )
-                    except Exception:
-                        logger.warning(
-                            "Could not send the Yuuk1 rate-limit notice.", exc_info=True
-                        )
-                    logger.info(
-                        "Yuuk1 rate limit reached for a group; retry_after=%.1fs.",
+                    logger.debug(
+                        "Yuuk1 rate limit reached; retry_after=%.1fs.",
                         retry_after,
                     )
                     return
 
         except Exception:
-            # A guard failure must not accidentally permit an unapproved group request.
-            if group_id:
-                event.stop_event()
+            # A guard failure must never permit an unapproved QQ request.
+            event.stop_event()
+            if group_id or self.settings.allow_private_chat:
                 try:
                     await event.send(
-                        event.plain_result("Bot 暂时无法处理这条群聊请求，请稍后再试。")
+                        event.plain_result("Bot 暂时无法处理这条请求，请稍后再试。")
                     )
                 except Exception:
-                    logger.warning(
-                        "Could not send the Yuuk1 policy error notice.", exc_info=True
-                    )
-            logger.exception("Yuuk1 failed while checking a pending LLM request.")
+                    logger.warning("Could not send the Yuuk1 policy error notice.")
+            logger.error("Yuuk1 failed while checking a pending LLM request.")
 
     @filter.on_llm_request()
     async def customize_request(
@@ -121,6 +124,9 @@ class Yuuk1CorePlugin(Star):
     ) -> None:
         """Append stable persona context and mask provider exceptions for QQ users."""
         if not self._is_qq(event):
+            return
+        if not self._is_allowed_context(event):
+            event.stop_event()
             return
         try:
             event.set_extra(
@@ -135,13 +141,13 @@ class Yuuk1CorePlugin(Star):
             req.system_prompt = f"{existing}\n\n{addition}" if existing else addition
         except Exception:
             event.stop_event()
-            logger.exception("Yuuk1 failed while preparing the request policy.")
+            logger.error("Yuuk1 failed while preparing the request policy.")
             try:
                 await event.send(
                     event.plain_result("Bot 暂时无法处理这条请求，请稍后再试。")
                 )
             except Exception:
-                logger.warning("Could not send the Yuuk1 request error notice.", exc_info=True)
+                logger.warning("Could not send the Yuuk1 request error notice.")
 
     @filter.command_group("yuuk1").custom_filter(Yuuk1CommandAllowlistFilter)
     def yuuk1(self) -> None:
@@ -178,11 +184,9 @@ class Yuuk1CorePlugin(Star):
                 umo=event.unified_msg_origin
             )
             if provider is not None:
-                provider_id = provider.meta().id
-                model_name = provider.get_model()
-                provider_line = f"当前 Provider：已加载（{provider_id} / {model_name}）"
+                provider_line = "当前 Provider：已加载"
         except Exception:
-            logger.exception("Yuuk1 could not inspect the active provider.")
+            logger.error("Yuuk1 could not inspect the active provider.")
 
         yield event.plain_result(
             "Yuuk1 Core 状态：\n"
@@ -190,7 +194,7 @@ class Yuuk1CorePlugin(Star):
             f"当前群：{group_id}\n"
             f"{provider_line}（仅检查加载状态，未发起 API 请求）\n"
             "AstrBot Runtime：运行中\n"
-            f"群聊限流：{'启用' if self.settings.rate_limit_enabled else '关闭'}"
+            f"请求限流：{'启用' if self.settings.rate_limit_enabled else '关闭'}"
         )
 
     @yuuk1.command("reset")
@@ -208,7 +212,7 @@ class Yuuk1CorePlugin(Star):
                 event.unified_msg_origin
             )
         except Exception:
-            logger.exception("Yuuk1 could not reset the current conversation.")
+            logger.error("Yuuk1 could not reset the current conversation.")
             yield event.plain_result("清理会话失败，请稍后重试或查看 AstrBot 日志。")
             return
         yield event.plain_result("当前会话上下文已清理。")
@@ -236,7 +240,7 @@ class Yuuk1CorePlugin(Star):
             safe_traceback,
         )
         event.stop_event()
-        if self._is_qq(event):
+        if self._is_allowed_context(event):
             try:
                 await event.send(
                     event.plain_result(
@@ -244,16 +248,16 @@ class Yuuk1CorePlugin(Star):
                     )
                 )
             except Exception:
-                logger.warning(
-                    "Could not send the Yuuk1 plugin-error notice.", exc_info=True
-                )
+                logger.warning("Could not send the Yuuk1 plugin-error notice.")
 
     async def terminate(self) -> None:
         """AstrBot calls this during plugin unload; discard in-memory rate buckets."""
         global _ACTIVE_SETTINGS
         if _ACTIVE_SETTINGS is self.settings:
             _ACTIVE_SETTINGS = None
-        self.rate_limiter = SlidingWindowRateLimiter(
+        self.rate_limiter = TwoLevelRateLimiter(
+            self.settings.user_rate_limit_window,
+            self.settings.user_rate_limit_requests,
             self.settings.rate_limit_window,
             self.settings.rate_limit_requests,
         )

@@ -1,0 +1,154 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  repository:
+    name: Python, metadata, secrets and Compose
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: dev-requirements.txt
+      - name: Install development dependencies
+        run: python -m pip install -r dev-requirements.txt
+      - name: Python syntax
+        run: python -m compileall -q plugins tests
+      - name: Unit tests
+        run: python -m pytest -q
+      - name: Ruff
+        run: ruff check plugins tests
+      - name: Validate Star metadata and configuration schema
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          import yaml
+
+          plugin = Path("plugins/astrbot_plugin_yuuk1_core")
+          metadata = yaml.safe_load((plugin / "metadata.yaml").read_text(encoding="utf-8"))
+          schema = json.loads((plugin / "_conf_schema.json").read_text(encoding="utf-8"))
+
+          assert isinstance(metadata, dict)
+          assert metadata.get("name") == plugin.name
+          for field in ("author", "version", "astrbot_version"):
+              assert isinstance(metadata.get(field), str) and metadata[field].strip(), field
+          assert isinstance(metadata.get("support_platforms"), list)
+          assert "aiocqhttp" in metadata["support_platforms"]
+          assert (plugin / "main.py").is_file()
+
+          field_types = {"string": str, "text": str, "int": int, "bool": bool, "list": list}
+          assert isinstance(schema, dict) and schema
+          for name, field in schema.items():
+              assert isinstance(field, dict), name
+              kind = field.get("type")
+              assert kind in field_types, name
+              assert "default" in field, name
+              assert type(field["default"]) is field_types[kind], name
+          PY
+      - name: Check tracked files and secret patterns
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          import re
+          import subprocess
+
+          paths = [os.fsdecode(item) for item in subprocess.check_output(["git", "ls-files", "-z"]).split(b"\0") if item]
+          forbidden = [
+              path for path in paths
+              if path.startswith(("data/", "backups/"))
+              or (Path(path).name.startswith(".env") and path != ".env.example")
+              or Path(path).suffix.lower() in {".db", ".sqlite", ".sqlite3", ".log", ".session", ".cookie"}
+          ]
+          assert not forbidden, f"Runtime files are tracked: {forbidden}"
+
+          patterns = {
+              "API key": re.compile(rb"\bsk-[A-Za-z0-9_-]{24,}\b"),
+              "GitHub token": re.compile(rb"\bgh[pousr]_[A-Za-z0-9]{30,}\b"),
+              "GitHub fine-grained token": re.compile(rb"\bgithub_pat_[A-Za-z0-9_]{40,}\b"),
+              "private key": re.compile(rb"-----BEGIN " + rb"(?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
+          }
+          findings = []
+          for path in paths:
+              content = Path(path).read_bytes()
+              for label, pattern in patterns.items():
+                  if pattern.search(content):
+                      findings.append(f"{path}: {label}")
+          assert not findings, "Potential secrets in tracked files: " + ", ".join(findings)
+          PY
+          git check-ignore -q .env
+          git check-ignore -q data/ci-probe
+          git check-ignore -q backups/ci-probe
+      - name: Validate Compose configuration
+        run: |
+          docker compose version
+          docker compose --env-file .env.example config --quiet
+          python - <<'PY'
+          import json
+          import subprocess
+
+          config = json.loads(subprocess.check_output([
+              "docker", "compose", "--env-file", ".env.example", "config", "--format", "json"
+          ]))
+          services = config["services"]
+          assert {"astrbot", "napcat"} <= set(services)
+          for name in ("astrbot", "napcat"):
+              assert ":latest" not in services[name]["image"].lower(), name
+              assert "@sha256:" in services[name]["image"], name
+              ports = services[name].get("ports", [])
+              assert ports and all(port.get("host_ip") == "127.0.0.1" for port in ports), name
+              assert all(str(port.get("target")) != "6199" for port in ports), name
+
+          def require_bind(service, target, source_suffix, *, read_only=False):
+              matches = [v for v in services[service]["volumes"] if v.get("target") == target]
+              assert len(matches) == 1, f"{service}: {target}"
+              volume = matches[0]
+              assert volume.get("type") == "bind", f"{service}: {target}"
+              assert volume["source"].replace("\\", "/").endswith(source_suffix), f"{service}: {target}"
+              if read_only:
+                  assert volume.get("read_only") is True, f"{service}: {target} must be read-only"
+
+          require_bind("astrbot", "/AstrBot/data", "/data/astrbot")
+          require_bind(
+              "astrbot", "/AstrBot/data/plugins/astrbot_plugin_yuuk1_core",
+              "/plugins/astrbot_plugin_yuuk1_core", read_only=True,
+          )
+          require_bind("napcat", "/app/napcat/config", "/data/napcat/config")
+          require_bind("napcat", "/app/.config/QQ", "/data/napcat/qq")
+          PY
+
+  powershell:
+    name: PowerShell syntax
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Parse every management script
+        shell: pwsh
+        run: |
+          $allErrors = @()
+          Get-ChildItem -LiteralPath scripts -Filter '*.ps1' -File | ForEach-Object {
+            $tokens = $null
+            $parseErrors = $null
+            $null = [System.Management.Automation.Language.Parser]::ParseFile(
+              $_.FullName, [ref]$tokens, [ref]$parseErrors
+            )
+            if ($parseErrors) {
+              $allErrors += $parseErrors
+            }
+          }
+          if ($allErrors.Count -gt 0) {
+            $allErrors | Format-List
+            exit 1
+          }

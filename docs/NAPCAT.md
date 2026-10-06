@@ -20,16 +20,18 @@ ws://astrbot:6199/ws
 
 Compose 中的 `astrbot` 是 Docker 服务名。不要改成容器里的 `localhost`、宿主机 IP 或 Windows 主机名。6199 不发布到宿主机，只供同一私有 Docker 网络内的 NapCat 使用。
 
-在 AstrBot WebUI 的 Platforms 中添加并启用 OneBot v11，设置 Reverse WebSocket host 为 `0.0.0.0`、port 为 `6199`。NapCat 官方模板默认 token 为空，因此 AstrBot Token 也留空。若日后在共享网络或其他部署中启用 Token，必须同时改两端并确认 NapCat 的持久配置更新策略。
+在 AstrBot WebUI 的 Platforms 中添加并启用 OneBot v11，设置 Reverse WebSocket host 为 `0.0.0.0`、port 为 `6199`。NapCat 官方模板默认 token 为空，因此 AstrBot Token 也留空。
+
+`MODE=astrbot` 的启动脚本每次都会把内置 `astrbot.json` 复制为 `/app/napcat/config/onebot11.json`。因此，在 NapCat WebUI 手动填写的 OneBot token 下次启动可能被清空；只在 `.env` 增加一个 token 变量也不能自动同步 AstrBot 和 NapCat。本项目保留默认空 token，并用只含两个服务的 Compose 网络及不发布 6199 的端口配置限制入口。如果改成跨主机、共享网络或公开入口，必须另行设计持久的双端 token 配置，不应沿用这个默认模板。
 
 ## 如何验证
 
 1. `docker compose ps` 显示两个服务为 running。
-2. AstrBot Data & Logs → Logs 中看到 `aiocqhttp(OneBot v11) adapter connected.` 或当前版本对应的适配器已连接日志。
-3. `scripts/doctor.ps1` 能从 NapCat 容器通过 DNS 名 `astrbot` 连到 TCP 6199。
+2. AstrBot Data & Logs → Logs 中看到 OneBot v11 Adapter 已连接的日志；日志措辞可能因版本不同。
+3. `scripts/doctor.ps1` 检查容器、网络和已连接的日志证据。
 4. NapCat 已扫码登录后，在白名单群测试 @Bot 或回复 Bot。
 
-TCP 检查只能验证内部端口可连接；QQ 已登录及消息往返需要人工确认。
+日志和网络检查只能验证连接的部分证据；QQ 已登录及群消息往返需要人工确认。等待扫码应显示为 `[MANUAL]`，不是服务失败。
 
 ## 常见问题
 
@@ -37,4 +39,4 @@ TCP 检查只能验证内部端口可连接；QQ 已登录及消息往返需要�
 - **配置写了 localhost：**容器中的 localhost 指自己。NapCat 必须连服务名 `astrbot`。
 - **WebUI 打不开：**检查服务状态和 `.env` 中端口；若端口冲突，改 `ASTRBOT_WEBUI_PORT` 或 `NAPCAT_WEBUI_PORT` 再重启。
 - **扫码/登录失败：**查看 `scripts/logs.ps1 -Service napcat`；按 NapCat 当前版本支持的客户端与登录规则处理。
-- **QQ 已登录但 Bot 不回话：**确认 OneBot 已连接、AstrBot Profile 已选择模型、插件已启用、当前群号在 `allowed_groups` 中且触发方式符合 AstrBot Profile 设置。
+- **QQ 已登录但 Bot 不回话：**确认 OneBot 已连接、AstrBot Profile 已选择模型、Yuuk1 Core 已加载、当前群号在 `allowed_groups` 中且触发方式符合 AstrBot Profile 设置；默认 QQ 私聊关闭，并检查用户级与群级限流。

@@ -39,9 +39,20 @@ def normalize_ids(value: object) -> frozenset[str]:
 
 
 def is_group_allowed(group_id: object, allowed_groups: frozenset[str]) -> bool:
-    """Allow private chats; fail closed for groups absent from the allowlist."""
+    """Fail closed for groups absent from the allowlist and for private chats."""
     normalized_group_id = str(group_id or "").strip()
-    return not normalized_group_id or normalized_group_id in allowed_groups
+    return bool(normalized_group_id and normalized_group_id in allowed_groups)
+
+
+def is_qq_context_allowed(
+    group_id: object,
+    allowed_groups: frozenset[str],
+    allow_private_chat: bool,
+) -> bool:
+    """Apply the group allowlist or the explicit private-chat opt-in."""
+    if str(group_id or "").strip():
+        return is_group_allowed(group_id, allowed_groups)
+    return allow_private_chat
 
 
 def is_configured_admin(user_id: object, admin_users: frozenset[str]) -> bool:
@@ -78,11 +89,14 @@ def _bool_value(value: object, default: bool) -> bool:
 class CoreSettings:
     bot_name: str
     allowed_groups: frozenset[str]
+    allow_private_chat: bool
     admin_users: frozenset[str]
     system_prompt: str
     rate_limit_enabled: bool
     rate_limit_window: int
     rate_limit_requests: int
+    user_rate_limit_window: int
+    user_rate_limit_requests: int
 
 
 def normalize_config(config: Mapping[str, object] | None) -> CoreSettings:
@@ -95,11 +109,18 @@ def normalize_config(config: Mapping[str, object] | None) -> CoreSettings:
     return CoreSettings(
         bot_name=bot_name or "Yuuk1",
         allowed_groups=normalize_ids(values.get("allowed_groups", [])),
+        allow_private_chat=_bool_value(values.get("allow_private_chat", False), False),
         admin_users=normalize_ids(values.get("admin_users", [])),
         system_prompt=system_prompt,
         rate_limit_enabled=_bool_value(values.get("rate_limit_enabled", True), True),
         rate_limit_window=_positive_int(values.get("rate_limit_window", 60), 60, 86_400),
-        rate_limit_requests=_positive_int(values.get("rate_limit_requests", 5), 5, 10_000),
+        rate_limit_requests=_positive_int(values.get("rate_limit_requests", 15), 15, 10_000),
+        user_rate_limit_window=_positive_int(
+            values.get("user_rate_limit_window", 60), 60, 86_400
+        ),
+        user_rate_limit_requests=_positive_int(
+            values.get("user_rate_limit_requests", 3), 3, 10_000
+        ),
     )
 
 
@@ -114,7 +135,16 @@ class SlidingWindowRateLimiter:
     def allow(self, scope: str, now: float | None = None) -> tuple[bool, float]:
         """Record a hit; return (allowed, retry_after_seconds)."""
         timestamp = time.monotonic() if now is None else now
-        hits = self._hits.setdefault(scope, deque())
+        allowed, retry_after = self._check(scope, timestamp)
+        if allowed:
+            self._record(scope, timestamp)
+        return allowed, retry_after
+
+    def _check(self, scope: str, timestamp: float) -> tuple[bool, float]:
+        """Inspect capacity without consuming it, for compound policies."""
+        hits = self._hits.get(scope)
+        if hits is None:
+            return True, 0.0
         cutoff = timestamp - self.window_seconds
         while hits and hits[0] <= cutoff:
             hits.popleft()
@@ -131,5 +161,45 @@ class SlidingWindowRateLimiter:
             retry_after = max(0.0, hits[0] + self.window_seconds - timestamp)
             return False, retry_after
 
-        hits.append(timestamp)
+        return True, 0.0
+
+    def _record(self, scope: str, timestamp: float) -> None:
+        self._hits.setdefault(scope, deque()).append(timestamp)
+
+
+class TwoLevelRateLimiter:
+    """Charge admitted requests to both a QQ user and its group."""
+
+    def __init__(
+        self,
+        user_window_seconds: int,
+        user_request_limit: int,
+        group_window_seconds: int,
+        group_request_limit: int,
+    ) -> None:
+        self.user = SlidingWindowRateLimiter(user_window_seconds, user_request_limit)
+        self.group = SlidingWindowRateLimiter(group_window_seconds, group_request_limit)
+
+    def allow(
+        self,
+        user_id: str,
+        group_id: str,
+        now: float | None = None,
+    ) -> tuple[bool, float]:
+        """Reject without charging either bucket; private chats use only user quota."""
+        user_key = str(user_id or "").strip()
+        group_key = str(group_id or "").strip()
+        if not user_key:
+            return False, 0.0
+        timestamp = time.monotonic() if now is None else now
+        user_allowed, user_retry = self.user._check(user_key, timestamp)
+        if group_key:
+            group_allowed, group_retry = self.group._check(group_key, timestamp)
+        else:
+            group_allowed, group_retry = True, 0.0
+        if not user_allowed or not group_allowed:
+            return False, max(user_retry, group_retry)
+        self.user._record(user_key, timestamp)
+        if group_key:
+            self.group._record(group_key, timestamp)
         return True, 0.0

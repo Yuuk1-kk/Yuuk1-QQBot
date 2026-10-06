@@ -9,7 +9,13 @@
     "description": "允许响应的群号",
     "type": "list",
     "default": [],
-    "hint": "填写 QQ 群号列表。列表为空时，插件对所有群聊默认静默；私聊命令不受群白名单影响。"
+    "hint": "填写 QQ 群号列表。列表为空时，插件对所有群聊默认静默。"
+  },
+  "allow_private_chat": {
+    "description": "允许 QQ 私聊",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭。启用后，私聊可使用 Yuuk1 命令和 AI 请求，仍受用户级限流约束。"
   },
   "admin_users": {
     "description": "项目管理员 QQ 号",
@@ -24,12 +30,24 @@
     "hint": "作为稳定的人格补充追加到 AstrBot 当前会话提示词后，不会替换 AstrBot Profile / Persona。"
   },
   "rate_limit_enabled": {
-    "description": "启用群聊限流",
+    "description": "启用 QQ 请求限流",
     "type": "bool",
     "default": true
   },
+  "user_rate_limit_window": {
+    "description": "用户级限流时间窗口（秒）",
+    "type": "int",
+    "default": 60,
+    "hint": "同一 QQ 用户跨群和私聊统一计数；有效范围 1 至 86400 秒。"
+  },
+  "user_rate_limit_requests": {
+    "description": "每个用户在窗口内的请求数",
+    "type": "int",
+    "default": 3,
+    "hint": "有效范围 1 至 10000 次；超出时静默丢弃，不占用群额度。"
+  },
   "rate_limit_window": {
-    "description": "限流时间窗口（秒）",
+    "description": "群级限流时间窗口（秒）",
     "type": "int",
     "default": 60,
     "hint": "按整个群计数；有效范围 1 至 86400 秒。"
@@ -37,7 +55,7 @@
   "rate_limit_requests": {
     "description": "每个群在窗口内的请求数",
     "type": "int",
-    "default": 5,
+    "default": 15,
     "hint": "按群聊中的模型请求计数；有效范围 1 至 10000 次。"
   }
 }

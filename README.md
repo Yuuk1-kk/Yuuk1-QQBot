@@ -2,16 +2,18 @@
 
 基于 AstrBot、NapCatQQ、OneBot v11 Reverse WebSocket 和 DeepSeek 的 QQ 群 AI Bot 项目。AstrBot 负责运行时、平台适配、Provider、会话和 WebUI；项目定制逻辑只放在 Star 插件中。
 
+**Status: v0.1 Release Candidate · Ready for manual integration.** 运行时镜像引用已锁定；容器启动、插件实际加载、QQ 登录和 DeepSeek 请求仍须在具备 Docker 与本人凭据的环境中核验，结果见 [PROGRESS.md](PROGRESS.md)。
+
 ## 架构
 
 ```text
 QQ 群
-  → NapCatQQ
-  → OneBot v11 Reverse WebSocket (ws://astrbot:6199/ws)
-  → AstrBot Platform Adapter / Pipeline / Conversation / Agent
-  → Yuuk1 Core Star
-  → AstrBot Provider
-  → DeepSeek API
+  ↓
+NapCatQQ
+  ↓ OneBot v11 Reverse WebSocket (ws://astrbot:6199/ws)
+AstrBot
+  ↓ Yuuk1 Core Star
+DeepSeek（经 AstrBot Provider）
 ```
 
 AstrBot 与 NapCat 位于同一 Compose 网络。6199 只在容器网络内可达；两个管理 WebUI 默认只绑定到宿主机回环地址。
@@ -22,7 +24,7 @@ AstrBot 与 NapCat 位于同一 Compose 网络。6199 只在容器网络内可�
 - NapCatQQ：QQ transport 与 OneBot v11
 - DeepSeek：通过 AstrBot 原生 Provider 接入
 - Docker Compose：服务编排与数据持久化
-- Yuuk1 Core：项目白名单、管理员命令、人格补充和群聊限流
+- Yuuk1 Core：群白名单、私聊开关、管理员命令、人格补充和用户级 + 群级限流
 
 ## 前置条件
 
@@ -33,30 +35,34 @@ AstrBot 与 NapCat 位于同一 Compose 网络。6199 只在容器网络内可�
 
 ## Quick Start
 
-在仓库根目录打开 PowerShell：
+私有仓库创建并授予访问权限后，将以下 `<private-repository-url>` 换成 GitHub 页面上的实际克隆地址，再在 PowerShell 中执行：
 
 ```powershell
+git clone <private-repository-url> Yuuk1-QQBot
+Set-Location .\Yuuk1-QQBot
 .\scripts\bootstrap.ps1
 notepad .env
 ```
 
-在 `.env` 中把 `DEEPSEEK_API_KEY` 替换为真实密钥，然后启动：
+`bootstrap.ps1` 会创建未跟踪的 `.env` 和数据目录，并检查 Docker CLI、Compose 与 Engine；不会安装 Docker 或生成密钥。在 `.env` 中把 `DEEPSEEK_API_KEY=replace-me` 改为真实密钥，然后启动：
 
 ```powershell
 .\scripts\start.ps1
-.\scripts\logs.ps1 -Service astrbot
+.\scripts\doctor.ps1
 ```
 
-打开 AstrBot WebUI `http://127.0.0.1:6185`，按首次启动日志中的信息登录。随后按 [SETUP](docs/SETUP.md) 配置 DeepSeek Provider、OneBot v11 Adapter 和插件白名单；打开 NapCat WebUI `http://127.0.0.1:6099/webui` 并扫码登录 QQ。真实 API 调用和 QQ 群验证需要手动完成。
+打开 AstrBot WebUI `http://127.0.0.1:6185`，按首次启动日志登录并修改初始密码。确认 Yuuk1 Core 出现在插件列表，再配置 DeepSeek Provider / Profile 和 OneBot v11 Adapter。打开 NapCat WebUI `http://127.0.0.1:6099/webui`，用 Bot QQ 扫码登录。最后设置群白名单与项目管理员，在允许的 QQ 群中验证 @Bot、命令和 AI 回复。具体顺序见 [部署指南](docs/SETUP.md)。
 
 详细步骤见 [部署指南](docs/SETUP.md)、[NapCat 指南](docs/NAPCAT.md) 和 [DeepSeek 指南](docs/DEEPSEEK.md)。
 
 ## 配置入口
 
-- Docker 镜像、端口、时区、`DEEPSEEK_API_KEY`：仓库根目录 `.env`
+- 锁定的 Docker 镜像、端口、时区、`DEEPSEEK_API_KEY`：仓库根目录 `.env`；升级流程见 [UPSTREAM](docs/UPSTREAM.md)
 - AstrBot OneBot Adapter / Provider / Profile：AstrBot WebUI
-- 群白名单、管理员、人格、限流：AstrBot WebUI → 插件 → Yuuk1 Core 配置
+- 群白名单、私聊开关、管理员、人格、限流：AstrBot WebUI → 插件 → Yuuk1 Core 配置
 - NapCat 登录与 transport 配置：NapCat WebUI；Reverse WebSocket 地址由官方 `MODE=astrbot` 模板设为 `ws://astrbot:6199/ws`
+
+`allowed_groups` 为空时所有群默认静默；`allow_private_chat=false` 时 QQ 私聊默认禁用。群聊/私聊允许后，同一 QQ 用户默认每 60 秒最多 3 次模型请求，每个群默认每 60 秒最多 15 次；两级限流只在进程内保存。`/yuuk1 reset` 与 `/yuuk1 status` 仅对 `admin_users` 生效。
 
 ## 管理脚本
 
@@ -67,7 +73,9 @@ notepad .env
 | `scripts/stop.ps1` | 停止并移除容器，保留 `data/` |
 | `scripts/restart.ps1` | 重新创建并启动容器，保留 `data/` |
 | `scripts/logs.ps1` | 查看全部或指定服务日志 |
-| `scripts/doctor.ps1` | 检查服务、端口、OneBot 网络和必要配置是否存在 |
+| `scripts/doctor.ps1` | 输出 `[PASS]`、`[WARN]`、`[FAIL]`、`[MANUAL]` 诊断状态 |
+| `scripts/backup.ps1` | 停机后备份 AstrBot 数据和 NapCat 配置到忽略的 `backups/` |
+| `scripts/check-upstream.ps1` | 只报告当前锁定和上游版本，不自动升级 |
 
 开发检查可在仓库根目录运行：
 
@@ -79,14 +87,16 @@ python -m ruff check plugins tests
 
 ## 项目状态
 
-v0.1 实现和本地验证记录在 [PROGRESS.md](PROGRESS.md)。AstrBot/NapCat 启动、DeepSeek 实际请求、QQ 扫码和群聊往返都需要本机环境与真实凭据，未完成前均标记为 **MANUAL VERIFICATION REQUIRED**。
+静态验证、运行时阻塞和必须本人完成的集成步骤见 [PROGRESS.md](PROGRESS.md)。`doctor.ps1` 的网络检查不能代替真实 QQ 群消息与 DeepSeek 请求验证。
 
 ## 安全
 
-- `.env`、`data/`、NapCat QQ 会话和日志已加入 `.gitignore`。
+- `.env`、`data/`、`backups/`、NapCat QQ 会话和日志已加入 `.gitignore`。
 - WebUI 默认仅绑定 `127.0.0.1`；OneBot 6199 不发布到宿主机。
 - 不在插件配置、Git 跟踪文件或日志中存放、显示 API Key。
 - DeepSeek Key 通过 Compose 环境变量传给 AstrBot；在 Provider 表单中填写 `$DEEPSEEK_API_KEY`。
+- NapCat `MODE=astrbot` 每次启动都会重写 OneBot 模板，默认 Token 为空；本项目不写不可靠的配置补丁。默认只允许两容器通过专用 Compose 网络连接，详情见 [NapCat 指南](docs/NAPCAT.md)。
+- 备份默认不含 QQ 登录态；需要保留时显式使用 `scripts/backup.ps1 -IncludeQQSession`。备份含敏感数据，应由本人安全保管。
 - 不要把 WebUI 端口直接映射到公网。QQ 账号登录和 API Key 由用户本人保管。
 
 ## Upstream

@@ -4,7 +4,7 @@ Research snapshot: 2026-10-07. Prefer the official repositories and documentatio
 
 ## Revisions inspected
 
-- AstrBot stable release tag `v4.28.2`, commit `3c7adafa1397e182d60b1016bf88759265113c8a` (released 2026-09-27). The releases page also showed `v4.29.0-beta.1`, commit `f20fba64c29623d248629f4d4bb9474bf4e745bc` (2026-10-01); it is prerelease, so v0.1 targets the latest stable line instead.
+- AstrBot production baseline is stable release tag `v4.28.2`, commit `3c7adafa1397e182d60b1016bf88759265113c8a` (released 2026-09-27). The releases page also showed `v4.29.0-beta.1`, commit `f20fba64c29623d248629f4d4bb9474bf4e745bc` (2026-10-01). Its `-beta` tag makes it a beta regardless of GitHub's `release.prerelease` field, which can be false. Version checks must classify both the tag text and metadata; no beta is selected for this baseline.
 - NapCatQQ repository HEAD inspected: `ec6aadaeea38ed3bca67b82bab3d7a9c0f91b8d8`.
 - NapCat-Docker repository HEAD inspected: `a97f856bb0d0bf895293520d4323cc3cd3d9495a`, dated 2026-10-05. Read `compose/astrbot.yml`, `templates/templates/astrbot.json`, and `entrypoint.sh`.
 - DeepSeek official Quick Start, Chat Completions API, API Updates, and AstrBot's provider documentation checked on 2026-10-07.
@@ -27,11 +27,17 @@ AstrBot already has a global `platform_settings.enable_id_white_list` / `id_whit
 
 Yuuk1 keeps `allowed_groups` in this plugin because the project requires a per-project fail-closed default: an empty plugin list blocks every QQ group, and it does not change other AstrBot platforms/plugins. Duplicating the same non-empty IDs in AstrBot's global list is optional defense-in-depth for installations that want a runtime-wide allowlist; it is not required for Yuuk1's own AI and command policy. AstrBot's built-in `admins_id` similarly exists, but `admin_users` is scoped only to Yuuk1 management commands so project access does not grant broader AstrBot administration.
 
+Yuuk1's `allow_private_chat` defaults to `false`; QQ private chat is denied by both its command group filter and LLM request hooks until explicitly enabled. The global AstrBot whitelist is unsuitable as the only project gate because its empty list disables filtering and it can exempt AstrBot admins. `/yuuk1 reset` remains a project-admin command because the current group conversation may be shared.
+
 ## OneBot v11 / NapCat connection
 
 AstrBot's OneBot documentation explicitly says AstrBot is the Reverse WebSocket server and the protocol implementation is the client. The server listens on host `0.0.0.0` (for a container deployment), port `6199` by default, and path `/ws`; the connection URL is `ws(s)://<host>:6199/ws`.
 
-The inspected NapCat-Docker `MODE=astrbot` template configures a WebSocket client URL of `ws://astrbot:6199/ws`, array message format, no token, and reconnect intervals. Docker service-name DNS lets this work without a hard-coded host IP. Compose keeps 6199 private to the two-service bridge network and only publishes the two local admin UIs.
+The inspected NapCat-Docker `MODE=astrbot` template configures a WebSocket client URL of `ws://astrbot:6199/ws`, array message format, no token, and reconnect intervals. Docker service-name DNS lets this work without a hard-coded host IP. Its `entrypoint.sh` copies `/app/templates/astrbot.json` over `/app/napcat/config/onebot11.json` whenever `MODE` is set on startup. A token edited in NapCat WebUI would therefore not be a durable setting under this mode; a single `.env` variable would not reliably synchronize both ends. The project leaves the token empty with 6199 unexposed outside the two-service Compose bridge and both WebUIs bound to loopback. A deployment that changes those network assumptions needs a separate persistent token strategy.
+
+## Plugin discovery and source mount
+
+At v4.28.2, `PluginManager.plugin_store_path` comes from `get_astrbot_plugin_path()` (`data/plugins`). `_get_modules()` enumerates child directories and accepts one containing `main.py` or a Python file matching the directory name. `load()` imports `data.plugins.<directory>.main` for the former case and logs `Loading plugin <directory> ...` before import. The Compose `./data/astrbot:/AstrBot/data` mount supplies AstrBot's data root, and its nested read-only mount maps `./plugins/astrbot_plugin_yuuk1_core` to `/AstrBot/data/plugins/astrbot_plugin_yuuk1_core`. This leaves the repository's `main.py` in the actual loader path without copying plugin files. Recreating AstrBot after source changes triggers a fresh import. Source-path inspection establishes discoverability, while first container startup and the `Yuuk1 Core ready` log marker are still required to establish actual load success.
 
 ## Provider and plugin LLM invocation
 
@@ -46,6 +52,7 @@ The inspected NapCat-Docker `MODE=astrbot` template configures a WebSocket clien
 - AstrBot loads schema config from `data/config/<plugin_name>_config.json` and passes it to the plugin constructor. The WebUI schema supports `string`, `text`, `int`, `float`, `bool`, `object`, `list`, and other documented types; `secret: true` masks but does not encrypt a field.
 - AstrBot's plugin guide says persistent plugin data belongs in the AstrBot data area, not the plugin source folder, since updates may replace plugin files. Yuuk1 Core has no custom durable state; rate-limit buckets stay in memory.
 - The plugin uses `_conf_schema.json` (no custom Page), with JSON/list values normalized defensively.
+- A small two-level sliding-window limiter stays in memory: 3 admitted LLM requests per QQ user across groups and private chats, plus 15 per group, each over 60 seconds. Admission checks both capacities before recording either hit so one user hitting their personal quota does not spend more group quota. Private chats, when opted in, use only the user quota. The limits reset when the plugin process restarts.
 - The inspected upstream `pyproject.toml` configures Ruff, Pyright (`typeCheckingMode = basic`, Python 3.10), and pytest. This repository mirrors the Ruff rule families and line length, uses pytest for policy tests, and carries a matching Pyright basic-mode config. Pyright is not run in this workspace because the AstrBot SDK is supplied by the container runtime rather than installed into the local Python environment.
 
 ## Error behavior and the generic provider reply
@@ -64,10 +71,10 @@ The inspected v4.28.2 internal agent path catches a provider/agent exception and
 
 ## Yuuk1-specific behavior
 
-- Project-level fail-closed allowlist for group-originated default AI requests
+- Project-level fail-closed allowlist for QQ group AI requests and commands; private chat opt-in defaults off
 - Project-configured admin IDs for `/yuuk1 status` and `/yuuk1 reset`
 - Stable Bot name/system-prompt append that leaves the current profile/persona prompt in place
-- Per-group in-memory sliding-window request limit
+- Per-user and per-group in-memory sliding-window limits for LLM requests
 - Project command namespace and safe provider/runtime status
 - A generic user-facing provider error message, attached through the current event-extra extension point
 
@@ -93,6 +100,7 @@ The inspected v4.28.2 internal agent path catches a provider/agent exception and
 - [AstrBot Docker deployment](https://docs.astrbot.app/deploy/astrbot/docker.html)
 - [Provider setup](https://docs.astrbot.app/en/providers/start.html)
 - [Star plugin guide](https://docs.astrbot.app/dev/star/)
+- [v4.28.2 plugin loader source](https://github.com/AstrBotDevs/AstrBot/blob/v4.28.2/astrbot/core/star/star_manager.py)
 - [LLM Provider guide](https://docs.astrbot.app/en/dev/star/guides/ai.html)
 - [Plugin configuration schema](https://docs.astrbot.app/en/dev/star/guides/plugin-config.html)
 - [AstrBot global config and allowlist](https://docs.astrbot.app/en/dev/astrbot-config.html)
@@ -105,6 +113,7 @@ The inspected v4.28.2 internal agent path catches a provider/agent exception and
 - [NapCat-Docker repository](https://github.com/NapNeko/NapCat-Docker)
 - [NapCat-Docker AstrBot Compose template](https://github.com/NapNeko/NapCat-Docker/blob/main/compose/astrbot.yml)
 - [NapCat-Docker AstrBot OneBot template](https://github.com/NapNeko/NapCat-Docker/blob/main/templates/templates/astrbot.json)
+- [NapCat-Docker startup entrypoint](https://github.com/NapNeko/NapCat-Docker/blob/main/entrypoint.sh)
 
 ### DeepSeek official
 
@@ -114,9 +123,9 @@ The inspected v4.28.2 internal agent path catches a provider/agent exception and
 
 ## Research decisions
 
-- Use the latest stable AstrBot release, not the newer beta, for v0.1 compatibility.
+- Pin the reviewed AstrBot stable `v4.28.2` image by tag and digest, and treat `-alpha`, `-beta`, `-rc`, and `-preview` tag names as non-stable even if release metadata says otherwise. Keep NapCat pinned separately; see `docs/UPSTREAM.md`.
 - Use AstrBot's DeepSeek/OpenAI-compatible Provider and its environment-variable support; no custom DeepSeek client.
 - Use NapCat's official AstrBot mode template and service-name DNS; do not expose the internal 6199 listener to the host.
 - Use Star schema config for the small set of editable project settings; no Plugin Page.
 - Use AstrBot's ConversationManager API to reset and AstrBot's native Profile/Persona pipeline rather than a parallel database or prompt manager.
-- Empty `allowed_groups` blocks every group by default. Private-chat commands are not constrained by the group allowlist.
+- Empty `allowed_groups` blocks every group by default, and `allow_private_chat=false` blocks QQ private chats by default. Both checks apply to the project command group and LLM hooks.
