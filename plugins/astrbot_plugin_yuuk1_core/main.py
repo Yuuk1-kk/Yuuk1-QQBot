@@ -149,7 +149,8 @@ class Yuuk1CorePlugin(Star):
             except Exception:
                 logger.warning("Could not send the Yuuk1 request error notice.")
 
-    @filter.command_group("yuuk1").custom_filter(Yuuk1CommandAllowlistFilter)
+    @filter.custom_filter(Yuuk1CommandAllowlistFilter)
+    @filter.command_group("yuuk1")
     def yuuk1(self) -> None:
         """Namespace for Yuuk1 project commands."""
         pass

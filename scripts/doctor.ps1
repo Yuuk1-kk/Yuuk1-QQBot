@@ -6,6 +6,14 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location -LiteralPath $repoRoot
 $failures = 0
 
+# Docker Desktop's per-user installer may not update an already-running terminal PATH.
+if (-not (Get-Command docker -ErrorAction SilentlyContinue) -and $env:LOCALAPPDATA) {
+    $dockerBin = Join-Path $env:LOCALAPPDATA 'Programs/DockerDesktop/resources/bin'
+    if (Test-Path -LiteralPath (Join-Path $dockerBin 'docker.exe') -PathType Leaf) {
+        $env:PATH = "$dockerBin;$env:PATH"
+    }
+}
+
 function Write-Check([string]$Level, [string]$Name, [string]$Detail) {
     $color = switch ($Level) {
         'PASS' { 'Green' }
@@ -168,8 +176,8 @@ if ($napcatRunning) {
     Write-Check 'MANUAL' 'NapCat QQ login' 'QQ 首次登录/扫码状态请在 NapCat WebUI 核对。'
 
     if ($astrbotRunning) {
-        $oneBotProbe = 'const s=require("net").connect(6199,"astrbot",()=>{s.end();process.exit(0)});s.setTimeout(3000,()=>process.exit(1));s.on("error",()=>process.exit(1));'
-        docker compose exec -T napcat node -e $oneBotProbe *> $null
+        $oneBotProbe = 'timeout 3 bash -c "echo >/dev/tcp/astrbot/6199"'
+        docker compose exec -T napcat bash -c $oneBotProbe *> $null
         $oneBotReachable = $LASTEXITCODE -eq 0
         Write-Check $(if ($oneBotReachable) { 'PASS' } else { 'MANUAL' }) 'OneBot TCP 6199' 'NapCat 到 astrbot:6199 的网络探测；连接确认以 AstrBot 日志为准。'
     }
@@ -179,3 +187,4 @@ if ($napcatRunning) {
 
 Write-Host "Doctor 完成：$failures 项失败；WARN 和 MANUAL 不计为代码失败。"
 if ($failures -gt 0) { exit 1 }
+exit 0
