@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import inspect
 import sys
 import time
 import types
@@ -21,7 +22,10 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from PIL import Image as PillowImage
+
 from plugins.astrbot_plugin_yuuk1_core.group_chat import GroupMessage
+from plugins.astrbot_plugin_yuuk1_core.stickers import StickerCatalog
 
 _REGISTERED_DIRECT_FILTERS: list[tuple[object, object]] = []
 
@@ -235,6 +239,10 @@ class AstrBotPluginRegistrationTests(unittest.TestCase):
         self.assertEqual(registered_listeners[0][1].__name__, "on_group_message")
         self.assertEqual(len(registered_tools), 1)
         self.assertEqual(registered_tools[0][0], "jingjing_sticker")
+        self.assertEqual(
+            list(inspect.signature(registered_tools[0][1]).parameters),
+            ["self", "event", "category"],
+        )
         group_observer = registered_listeners[0][1]
         observer_filter = next(
             custom_filter
@@ -374,6 +382,24 @@ class AstrBotPluginRegistrationTests(unittest.TestCase):
                 context,
                 {"allowed_groups": ["12345"], "stickers_enabled": True, "group_identity_enabled": False},
             )
+            # Production assets are committed; model the empty-gallery case
+            # explicitly instead of depending on the repository asset directory.
+            disabled_instance.stickers = StickerCatalog({})
+            empty_gallery_reply = await disabled_instance.jingjing_sticker_tool(
+                FakeEvent(), "happy"
+            )
+            assert "没有可用" in empty_gallery_reply
+            stickers_off_instance = plugin.Yuuk1CorePlugin(
+                context,
+                {"allowed_groups": ["12345"], "stickers_enabled": False},
+            )
+            stickers_off_event = FakeEvent()
+            stickers_off_reply = await stickers_off_instance.jingjing_sticker_tool(
+                stickers_off_event, "happy"
+            )
+            assert "当前关闭" in stickers_off_reply
+            assert getattr(stickers_off_event, plugin._STICKER_SELECTION_ATTR, None) is None
+            await stickers_off_instance.terminate()
             allowed_event = FakeEvent()
             assert not observer_filter.filter(allowed_event, {})
             instance = plugin.Yuuk1CorePlugin(
@@ -386,6 +412,14 @@ class AstrBotPluginRegistrationTests(unittest.TestCase):
                     "free_talk_nickname_probability": 1.0,
                 },
             )
+            bot_reply_records = []
+            record_bot_reply = instance._record_bot_reply
+
+            def record_bot_reply_once(session, **kwargs):
+                bot_reply_records.append((session, dict(kwargs)))
+                return record_bot_reply(session, **kwargs)
+
+            instance._record_bot_reply = record_bot_reply_once
             assert observer_filter.filter(allowed_event, {})
 
             # Identity-only operation updates names without retaining ordinary
@@ -866,6 +900,9 @@ class AstrBotPluginRegistrationTests(unittest.TestCase):
                 extra_user_content_parts=[],
                 func_tool=tool_set,
             )
+            # Exercise the hidden-tool behavior independently of committed
+            # production assets; the asset-present case is covered below.
+            instance.stickers = StickerCatalog({})
             await instance.customize_request(event_with_context, request)
             assert "前文含敏感测试标记" not in request.system_prompt
             assert len(request.extra_user_content_parts) == 1
@@ -881,58 +918,139 @@ class AstrBotPluginRegistrationTests(unittest.TestCase):
 
             context.send_error = True
             with TemporaryDirectory() as directory:
-                image_path = Path(directory) / "private-name.png"
-                image_path.write_bytes(b"synthetic")
+                sticker_root = Path(directory) / "stickers"
+                image_path = sticker_root / "happy" / "private-name.png"
+                image_path.parent.mkdir(parents=True)
+                PillowImage.new("RGB", (3, 2), color=(64, 128, 192)).save(image_path)
+                instance.sticker_root = sticker_root
+                instance.stickers = StickerCatalog(
+                    {"happy": (image_path.resolve(),)},
+                    history_size=instance.settings.sticker_repeat_window,
+                )
+
+                class VisibleToolSet:
+                    def __init__(self):
+                        self.tools = {"jingjing_sticker", "web_search"}
+
+                    def remove_tool(self, name):
+                        self.tools.discard(name)
+
+                visible_tools = VisibleToolSet()
+                enabled_request = SimpleNamespace(
+                    system_prompt="",
+                    extra_user_content_parts=[],
+                    func_tool=visible_tools,
+                )
+                await instance.customize_request(FakeEvent(), enabled_request)
+                assert visible_tools.tools == {"jingjing_sticker", "web_search"}
+
+                # The tool receives only an allowlisted category. The selected
+                # local path stays on the event and never enters tool output.
+                tool_event = FakeEvent()
+                llm_calls_before_tool = context.llm_calls
+                tool_reply = await instance.jingjing_sticker_tool(tool_event, "happy")
+                assert str(image_path) not in tool_reply
+                assert getattr(tool_event, plugin._STICKER_SELECTION_ATTR)["path"] == str(
+                    image_path.resolve()
+                )
+                second_tool_reply = await instance.jingjing_sticker_tool(
+                    tool_event, "happy"
+                )
+                assert "已经选择过" in second_tool_reply
+                assert str(image_path) not in repr(tool_event.extras)
+                assert context.llm_calls == llm_calls_before_tool
+
+                invalid_event = FakeEvent()
+                invalid_reply = await instance.jingjing_sticker_tool(
+                    invalid_event, "../../outside"
+                )
+                assert str(image_path) not in invalid_reply
+                assert getattr(invalid_event, plugin._STICKER_SELECTION_ATTR, None) is None
+
+                # A failed optional image send leaves generated text untouched.
                 original_text = _Plain("这是保底文字")
                 result = SimpleNamespace(chain=[original_text])
                 image_event = FakeEvent(
                     attributes={
                         plugin._STICKER_SELECTION_ATTR: {
                             "path": str(image_path),
-                            "mode": "sticker_only",
                             "category": "happy",
-                        }
+                        },
+                        plugin._ENGAGEMENT_PENDING_ATTR: True,
                     },
                     result=result,
                 )
+                image_event._has_send_oper = True
                 await instance.decorate_sticker_result(image_event)
                 assert result.chain == [original_text]
+                assert getattr(image_event, plugin._PENDING_STICKER_ATTR) == str(
+                    image_path
+                )
+                assert str(image_path) not in repr(image_event.extras)
+                await instance.after_message_sent(image_event)
+                assert result.chain == [original_text]
+                assert len(bot_reply_records) == 1
+                sticker_failure_logs = [
+                    message
+                    for _level, message in log_records
+                    if "sticker_send_failed" in message
+                ]
+                assert sticker_failure_logs
+                assert all(str(image_path) not in message for message in sticker_failure_logs)
+                assert all("exception_type=" in message for message in sticker_failure_logs)
+                assert all("synthetic-user" not in message for message in sticker_failure_logs)
+                assert all("12345" not in message for message in sticker_failure_logs)
+                assert all("这是保底文字" not in message for message in sticker_failure_logs)
 
-                text_event = FakeEvent(
+                corrupt_path = sticker_root / "happy" / "corrupt.png"
+                corrupt_path.write_bytes(b"\x89PNG\r\n\x1a\ncorrupt")
+                corrupt_result = SimpleNamespace(chain=[_Plain("损坏图片时仍保留这句文字")])
+                corrupt_event = FakeEvent(
+                    attributes={
+                        plugin._STICKER_SELECTION_ATTR: {
+                            "path": str(corrupt_path),
+                            "category": "happy",
+                        }
+                    },
+                    result=corrupt_result,
+                )
+                await instance.decorate_sticker_result(corrupt_event)
+                assert corrupt_result.chain[0].text == "损坏图片时仍保留这句文字"
+                assert getattr(corrupt_event, plugin._PENDING_STICKER_ATTR, None) is None
+
+                empty_failed_result = SimpleNamespace(chain=[])
+                empty_failed_event = FakeEvent(
                     attributes={
                         plugin._STICKER_SELECTION_ATTR: {
                             "path": str(image_path),
-                            "mode": "text_and_sticker",
                             "category": "happy",
                         }
                     },
-                    result=result,
+                    result=empty_failed_result,
                 )
-                await instance.decorate_sticker_result(text_event)
-                assert result.chain == [original_text]
-                assert getattr(text_event, plugin._PENDING_STICKER_ATTR) == str(
-                    image_path
-                )
-                assert str(image_path) not in repr(text_event.extras)
-                await instance.after_message_sent(text_event)
-                assert result.chain == [original_text]
+                await instance.decorate_sticker_result(empty_failed_event)
+                assert [part.text for part in empty_failed_result.chain] == [
+                    plugin._STICKER_SEND_FALLBACK_TEXT
+                ]
 
                 # A future text-and-sticker reply keeps the order text, more
                 # text, sticker while using one completed LLM result.
                 context.send_error = False
                 context.sent_messages.clear()
+                bot_reply_records.clear()
                 combined_event = FakeEvent(
                     attributes={
                         plugin._STICKER_SELECTION_ATTR: {
                             "path": str(image_path),
-                            "mode": "text_and_sticker",
                             "category": "happy",
-                        }
+                        },
+                        plugin._ENGAGEMENT_PENDING_ATTR: True,
                     },
                     result=FakeResult(
                         "干嘛，突然叫这么大声。\n我又没跑。\n找鲸鲸什么事？"
                     ),
                 )
+                combined_event._has_send_oper = True
                 await instance.decorate_sticker_result(combined_event)
                 assert combined_event.result.chain[0].text == "干嘛，突然叫这么大声。"
                 await instance.after_message_sent(combined_event)
@@ -942,6 +1060,30 @@ class AstrBotPluginRegistrationTests(unittest.TestCase):
                     "找鲸鲸什么事？",
                 ]
                 assert context.sent_messages[2][0].path == str(image_path)
+                assert len(bot_reply_records) == 1
+
+                # An empty final text result uses the same selected asset as an
+                # image-only reply and sends exactly once.
+                context.sent_messages.clear()
+                bot_reply_records.clear()
+                image_only_result = SimpleNamespace(chain=[])
+                image_only_event = FakeEvent(
+                    attributes={
+                        plugin._STICKER_SELECTION_ATTR: {
+                            "path": str(image_path),
+                            "category": "happy",
+                        },
+                        plugin._ENGAGEMENT_PENDING_ATTR: True,
+                    },
+                    result=image_only_result,
+                )
+                await instance.decorate_sticker_result(image_only_event)
+                assert image_only_result.chain == []
+                assert len(context.sent_messages) == 1
+                assert context.sent_messages[0][0].path == str(image_path)
+                await instance.after_message_sent(image_only_event)
+                assert len(context.sent_messages) == 1
+                assert len(bot_reply_records) == 1
             await instance.terminate()
             await disabled_instance.terminate()
             await identity_only_instance.terminate()

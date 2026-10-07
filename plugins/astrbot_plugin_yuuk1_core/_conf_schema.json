@@ -164,7 +164,13 @@
     "description": "Sticker：启用鲸鲸本地表情包",
     "type": "bool",
     "default": false,
-    "hint": "默认关闭。只从插件 assets/stickers 受控目录读取 PNG/JPG/JPEG 文件。"
+    "hint": "默认关闭。仅当受控素材目录内存在通过图片解码校验的 PNG/JPG/JPEG 时才向当前请求提供 jingjing_sticker 工具。"
+  },
+  "sticker_repeat_window": {
+    "description": "Sticker：避免重复的最近图片数",
+    "type": "int",
+    "default": 4,
+    "hint": "范围 1 至 5。按全局匿名图片标识暂存于内存；不足以轮换时允许重复。"
   },
   "idle_speak_enabled": {
     "description": "Idle Presence：启用安静时主动冒泡",

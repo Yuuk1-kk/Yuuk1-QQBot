@@ -148,6 +148,7 @@ class CoreSettings:
     multi_message_max_parts: int
     multi_message_min_chars_to_split: int
     stickers_enabled: bool
+    sticker_repeat_window: int
     idle_speak_enabled: bool
     idle_threshold_seconds: int
     idle_check_interval_seconds: int
@@ -231,6 +232,9 @@ def normalize_config(config: Mapping[str, object] | None) -> CoreSettings:
             values.get("multi_message_min_chars_to_split", 20), 20, 1000
         ),
         stickers_enabled=_bool_value(values.get("stickers_enabled", False), False),
+        sticker_repeat_window=_positive_int(
+            values.get("sticker_repeat_window", 4), 4, 5
+        ),
         idle_speak_enabled=_bool_value(values.get("idle_speak_enabled", False), False),
         idle_threshold_seconds=_positive_int(
             values.get("idle_threshold_seconds", 1800), 1800, 604_800

@@ -47,8 +47,13 @@ from .logic import (
 from .multi_message import split_natural_messages
 from .presence import ManagedAsyncTask, idle_is_eligible
 from .stickers import (
+    STICKER_CATEGORIES,
+    STICKER_CATEGORY_DESCRIPTIONS,
+    STICKER_ONLY,
+    TEXT_AND_STICKER,
     StickerCatalog,
     decoration_action,
+    inspect_sticker_asset,
     normalize_sticker_mode,
     remove_sticker_tool_when_disabled,
 )
@@ -69,8 +74,10 @@ _ENGAGEMENT_PENDING_ATTR = "_yuuk1_engagement_pending"
 _PENDING_TEXT_PARTS_ATTR = "_yuuk1_pending_text_parts"
 _FULL_REPLY_TEXT_ATTR = "_yuuk1_full_reply_text"
 _STICKER_SELECTION_ATTR = "_yuuk1_sticker_selection"
+_STICKER_TOOL_USED_ATTR = "_yuuk1_sticker_tool_used"
 _PENDING_STICKER_ATTR = "_yuuk1_pending_sticker"
 _STICKER_ONLY_SENT_ATTR = "_yuuk1_sticker_only_sent"
+_STICKER_SEND_FALLBACK_TEXT = "鲸鲸在这儿。"
 
 _IDLE_FREE_TALK_DECISION_SYSTEM = (
     "你是群聊发言门控器，不是聊天机器人。结合近期消息和当前消息判断鲸鲸是否适合主动加入普通群聊。"
@@ -213,11 +220,20 @@ class Yuuk1CorePlugin(Star):
             ttl_seconds=self.settings.free_talk_context_ttl_seconds,
         )
         asset_root = Path(__file__).resolve().parent / "assets" / "stickers"
-        self.stickers, rejected_assets = StickerCatalog.scan(asset_root)
+        self.sticker_root = asset_root
+        self.stickers, rejected_assets = StickerCatalog.scan(
+            asset_root,
+            history_size=self.settings.sticker_repeat_window,
+        )
         if rejected_assets:
             logger.warning(
                 "Yuuk1 skipped %s invalid local sticker asset(s).", rejected_assets
             )
+        logger.info(
+            "Yuuk1 Sticker subsystem ready; assets=%s; tool_available=%s",
+            self.stickers.asset_count,
+            self.settings.stickers_enabled and self.stickers.asset_count > 0,
+        )
 
     async def initialize(self) -> None:
         """Expose an unambiguous post-initialization signal for runtime checks."""
@@ -869,33 +885,35 @@ class Yuuk1CorePlugin(Star):
         self,
         event: AstrMessageEvent,
         category: str,
-        mode: str,
     ) -> str:
-        """从鲸鲸本地表情图库选择一张受控图片。
+        """按语境选择一张鲸鲸本地表情；不要为了展示功能强行调用。
 
         Args:
-            category(string): 情绪分类，如 happy、angry、sad、confused 或 neutral。
-            mode(string): 回复方式，只能是 text_and_sticker 或 sticker_only。
+            category(string): 只能选择下列分类：happy（开心、轻快、被夸或积极回应）；angry（轻微生气、嘴硬或被叫大肥鱼后的抗议）；speechless（无语、绷不住或不知道说什么）；smug（得意、嘴硬或轻微挑衅）；sad（难过、委屈或低落）；confused（疑惑、没听懂或问号）；laugh（大笑、觉得好玩或绷不住）；peek（探头、出现或偷偷看）；fatfish（大肥鱼相关自嘲、抗议或鲸鲸梗）；neutral（普通、平静或低强度反应）。
         """
         if not self.settings.stickers_enabled:
             return "鲸鲸表情功能当前关闭，请只用文字完成回复。"
-        selection = self.stickers.select(category, event.unified_msg_origin)
+        if category not in STICKER_CATEGORIES:
+            return "表情分类不受支持，请只用文字完成回复。"
+        if bool(getattr(event, _STICKER_TOOL_USED_ATTR, False)):
+            return "本轮已经选择过表情，请继续完成回复，不要再选择。"
+        selection = self.stickers.select(category, "global")
         if selection is None:
             return "当前没有可用的鲸鲸表情图片，请只用文字完成回复。"
         path, selected_category = selection
-        selected_mode = normalize_sticker_mode(mode)
+        setattr(event, _STICKER_TOOL_USED_ATTR, True)
         setattr(
             event,
             _STICKER_SELECTION_ATTR,
             {
                 "path": str(path),
                 "category": selected_category,
-                "mode": selected_mode,
             },
         )
         return (
-            f"已选择 {selected_category} 表情。"
-            "按指定方式完成回复，不要提及本地文件、路径或工具。"
+            f"已选择 {STICKER_CATEGORY_DESCRIPTIONS[selected_category]} 表情。"
+            "请根据当前语境自然回复；如果文字没有额外价值，可以只发这张表情。"
+            "不要提及本地文件、路径或工具。"
         )
 
     @filter.on_decorating_result()
@@ -914,19 +932,35 @@ class Yuuk1CorePlugin(Star):
         path_value = selection.get("path")
         if not isinstance(path_value, str):
             return
-        path = Path(path_value)
         result = event.get_result()
-        mode = normalize_sticker_mode(selection.get("mode"))
-        image_available = await asyncio.to_thread(path.is_file)
+        mode = (
+            TEXT_AND_STICKER
+            if self._result_contains_text(result)
+            else STICKER_ONLY
+        )
+        path, validation_error = await asyncio.to_thread(
+            inspect_sticker_asset,
+            Path(path_value),
+            self.sticker_root,
+        )
+        if path is None:
+            if mode == STICKER_ONLY:
+                self._ensure_sticker_text_fallback(event)
+            self._log_sticker_send_failed("validate", validation_error or "InvalidAsset")
+            return
+        mode = normalize_sticker_mode(mode)
+        image_available = True
         action = decoration_action(mode, image_available)
         if action == "text_fallback":
-            logger.warning("Yuuk1 sticker asset became unavailable before sending.")
+            self._log_sticker_send_failed("validate", "InvalidAsset")
             return
 
         try:
             image = Image.fromFileSystem(str(path))
-        except Exception:
-            logger.warning("Yuuk1 could not prepare a sticker; keeping the text reply.")
+        except Exception as exc:
+            if action == "image_only":
+                self._ensure_sticker_text_fallback(event)
+            self._log_sticker_send_failed("image_prepare", type(exc).__name__)
             return
 
         if action == "image_only":
@@ -935,11 +969,13 @@ class Yuuk1CorePlugin(Star):
                     event.unified_msg_origin,
                     MessageChain([image]),
                 )
-            except Exception:
-                logger.warning("Yuuk1 sticker send failed; keeping the text reply.")
+            except Exception as exc:
+                self._ensure_sticker_text_fallback(event)
+                self._log_sticker_send_failed("image_send", type(exc).__name__)
                 return
             if not sent:
-                logger.warning("Yuuk1 sticker target was unavailable; keeping text.")
+                self._ensure_sticker_text_fallback(event)
+                self._log_sticker_send_failed("image_send", "SendRejected")
                 return
             if result is not None and result.chain is not None:
                 result.chain.clear()
@@ -1029,9 +1065,16 @@ class Yuuk1CorePlugin(Star):
             and isinstance(pending_path, str)
             and text_parts_sent
         ):
-            path = Path(pending_path)
-            if not await asyncio.to_thread(path.is_file):
-                logger.warning("Yuuk1 sticker asset became unavailable after text delivery.")
+            path, validation_error = await asyncio.to_thread(
+                inspect_sticker_asset,
+                Path(pending_path),
+                self.sticker_root,
+            )
+            if path is None:
+                self._log_sticker_send_failed(
+                    "validate_after_text",
+                    validation_error or "InvalidAsset",
+                )
                 sticker_sent = False
             else:
                 try:
@@ -1043,18 +1086,23 @@ class Yuuk1CorePlugin(Star):
                         )
                     )
                     if not sticker_sent:
-                        logger.warning(
-                            "Yuuk1 sticker target was unavailable after text delivery."
+                        self._log_sticker_send_failed(
+                            "image_send_after_text",
+                            "SendRejected",
                         )
-                except Exception:
-                    logger.warning("Yuuk1 sticker send failed after text delivery.")
+                except Exception as exc:
+                    self._log_sticker_send_failed(
+                        "image_send_after_text",
+                        type(exc).__name__,
+                    )
                     sticker_sent = False
         elif isinstance(pending_path, str) and not text_parts_sent:
-            logger.debug("Yuuk1 sticker skipped; reason=text_part_delivery_failed")
             sticker_sent = False
 
         event_send_succeeded = bool(getattr(event, "_has_send_oper", False))
-        whole_turn_succeeded = event_send_succeeded and text_parts_sent and sticker_sent
+        whole_turn_succeeded = (
+            sticker_only_sent and sticker_sent
+        ) or (not sticker_only_sent and event_send_succeeded and text_parts_sent)
         pending_engagement = bool(getattr(event, _ENGAGEMENT_PENDING_ATTR, False))
         setattr(event, _ENGAGEMENT_PENDING_ATTR, False)
         if (
@@ -1091,6 +1139,40 @@ class Yuuk1CorePlugin(Star):
             )
         elif not whole_turn_succeeded and pending_engagement:
             logger.debug("Yuuk1 Free Talk skipped; reason=delivery_incomplete")
+
+    @staticmethod
+    def _result_contains_text(result: object) -> bool:
+        chain = getattr(result, "chain", None)
+        if not isinstance(chain, (list, tuple)):
+            return False
+        for component in chain:
+            if isinstance(component, Plain):
+                if isinstance(component.text, str) and component.text.strip():
+                    return True
+            else:
+                return True
+        return False
+
+    @classmethod
+    def _ensure_sticker_text_fallback(cls, event: AstrMessageEvent) -> None:
+        """Keep a minimal text reply when an image-only result cannot be sent."""
+        result = event.get_result()
+        if result is None or cls._result_contains_text(result):
+            return
+        result.chain = [Plain(_STICKER_SEND_FALLBACK_TEXT)]
+
+    @staticmethod
+    def _log_sticker_send_failed(stage: str, exception_type: str) -> None:
+        safe_exception_type = (
+            exception_type
+            if isinstance(exception_type, str) and exception_type.isidentifier()
+            else "StickerError"
+        )
+        logger.warning(
+            "Yuuk1 sticker_send_failed; stage=%s; exception_type=%s",
+            stage,
+            safe_exception_type,
+        )
 
     def _record_bot_reply(
         self,

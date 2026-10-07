@@ -69,6 +69,7 @@ class ConfigNormalizationTests(unittest.TestCase):
         self.assertEqual(settings.multi_message_max_parts, 3)
         self.assertEqual(settings.multi_message_min_chars_to_split, 20)
         self.assertFalse(settings.stickers_enabled)
+        self.assertEqual(settings.sticker_repeat_window, 4)
         self.assertFalse(settings.idle_speak_enabled)
         self.assertEqual(settings.idle_threshold_seconds, 1800)
         self.assertEqual(settings.idle_check_interval_seconds, 300)
@@ -94,6 +95,7 @@ class ConfigNormalizationTests(unittest.TestCase):
                 "free_talk_context_ttl_seconds": -1,
                 "free_talk_min_recent_messages": 1000,
                 "stickers_enabled": "yes",
+                "sticker_repeat_window": 100,
                 "idle_speak_enabled": True,
                 "idle_threshold_seconds": 999_999,
                 "idle_check_interval_seconds": "bad",
@@ -117,6 +119,7 @@ class ConfigNormalizationTests(unittest.TestCase):
         self.assertEqual(settings.multi_message_max_parts, 3)
         self.assertEqual(settings.multi_message_min_chars_to_split, 1)
         self.assertTrue(settings.stickers_enabled)
+        self.assertEqual(settings.sticker_repeat_window, 5)
         self.assertTrue(settings.idle_speak_enabled)
         self.assertEqual(settings.idle_threshold_seconds, 604_800)
         self.assertEqual(settings.idle_check_interval_seconds, 300)
