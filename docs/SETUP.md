@@ -27,7 +27,7 @@ Set-Location .\Yuuk1-QQBot
 
 首次启动时，AstrBot 日志会显示管理面板登录信息。打开 `http://127.0.0.1:6185`，登录后按 AstrBot 提示修改初始密码。NapCat WebUI 位于 `http://127.0.0.1:6099/webui`。两个 WebUI 默认只绑定宿主机 `127.0.0.1`。
 
-在 AstrBot 插件列表中确认 **Yuuk1 Core** 已加载，并在 AstrBot 日志中查找 `Yuuk1 Core ready`。仓库插件目录经 Compose 只读挂载到 `/AstrBot/data/plugins/astrbot_plugin_yuuk1_core`，这正是 AstrBot v4.28.2 的插件发现目录；修改仓库插件源码后运行 `.\scripts\restart.ps1` 即可重新加载。若列表和日志都没有该插件，运行 `.\scripts\doctor.ps1` 检查并查看 AstrBot 日志；不要仅凭仓库文件存在就视为已加载。
+在 AstrBot 插件列表中确认 **Yuuk1 Core** 已加载，并在 AstrBot 日志中查找 `Yuuk1 Core ready`。仓库插件目录经 Compose 只读挂载到 `/AstrBot/data/plugins/astrbot_plugin_yuuk1_core`，这正是 AstrBot v4.28.2 的插件发现目录。修改插件源码后可运行 `docker compose restart astrbot` 单独重新加载；整套服务重建使用 `.\scripts\restart.ps1`，并应先完成 NapCat 自动登录账号选择。doctor 会检查当前进程的插件就绪状态，不以有限日志窗口作为唯一依据。
 
 ## 4. 配置 DeepSeek Provider
 
@@ -47,7 +47,7 @@ NapCat 启动时的 `MODE=astrbot` 模板会创建指向 `ws://astrbot:6199/ws` 
 
 ## 6. 扫码登录并配置插件
 
-打开 `http://127.0.0.1:6099/webui`，查看 NapCat 日志/页面提示并用专用 QQ 账号扫码。扫码是人工步骤；NapCat 等待扫码不表示容器故障。登录后通过 AstrBot Data & Logs → Logs 确认 OneBot Adapter 已连接，也可运行 `.\scripts\doctor.ps1` 查看其日志证据。
+打开 `http://127.0.0.1:6099/webui`，查看 NapCat 页面提示并用专用 QQ 账号扫码。扫码后在 WebUI 为该账号设置“自动登录账号”，以便容器重建时尝试快速登录；不要把 QQ 号发到聊天或写入仓库。登录后运行 `.\scripts\doctor.ps1` 检查 NapCat 当前在线状态与 OneBot 当前连接状态。`restart.ps1` 在未选择自动登录账号时会拒绝重建，需要明确接受再次扫码时才使用 `-AllowQRRelogin`。要验证持久化，应重建后不扫码就确认 QQ 自动在线、OneBot 重连，并在群里 @Bot 收到回复。
 
 AstrBot WebUI → Plugins → Yuuk1 Core：
 

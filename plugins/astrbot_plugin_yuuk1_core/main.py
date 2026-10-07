@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 import re
+import tempfile
+import time
+from pathlib import Path
 from typing import Any
 
 from astrbot.api import AstrBotConfig, logger
@@ -28,6 +33,58 @@ _SECRET_ASSIGNMENT_RE = re.compile(
     r"(?:bearer\s+)?[\"']?[^\s,\"'}]+"
 )
 _ACTIVE_SETTINGS: CoreSettings | None = None
+_READY_MARKER = Path("/tmp/yuuk1-core-ready.json")
+_ONEBOT_MARKER = Path("/tmp/yuuk1-core-onebot.json")
+
+
+def _process_start_ticks(pid: int) -> str:
+    """Identify a process across PID reuse using Linux /proc start time."""
+    stat_tail = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").rsplit(") ", 1)[1]
+    return stat_tail.split()[19]
+
+
+def _marker_identity() -> dict[str, int | str]:
+    return {"pid": os.getpid(), "start_ticks": _process_start_ticks(os.getpid())}
+
+
+def _write_marker(path: Path, payload: dict[str, int | str | bool]) -> None:
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", prefix=".yuuk1-core-ready-", dir="/tmp", delete=False
+        ) as temporary:
+            temporary_path = Path(temporary.name)
+            json.dump(payload, temporary)
+        os.replace(temporary_path, path)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
+def _remove_marker(path: Path) -> None:
+    try:
+        marker = json.loads(path.read_text(encoding="utf-8"))
+        identity = _marker_identity()
+        if all(marker.get(key) == value for key, value in identity.items()):
+            path.unlink(missing_ok=True)
+    except (FileNotFoundError, OSError, ValueError, KeyError, IndexError, TypeError, AttributeError):
+        pass
+
+
+def _onebot_clients_connected(context: Context) -> bool:
+    """Inspect only clients accepted by the configured v4.28.2 WS adapter."""
+    for platform in context.get_config().get("platform", []):
+        if not isinstance(platform, dict) or not (
+            platform.get("type") == "aiocqhttp"
+            and platform.get("enable") is True
+            and platform.get("ws_reverse_port") == 6199
+        ):
+            continue
+        adapter = context.get_platform_inst(platform.get("id", ""))
+        clients = getattr(getattr(adapter, "bot", None), "_wsr_api_clients", None)
+        if isinstance(clients, dict) and bool(clients):
+            return True
+    return False
 
 
 class Yuuk1CommandAllowlistFilter(filter.CustomFilter):
@@ -58,10 +115,45 @@ class Yuuk1CorePlugin(Star):
             self.settings.rate_limit_window,
             self.settings.rate_limit_requests,
         )
+        self._onebot_monitor_task: asyncio.Task[None] | None = None
 
     async def initialize(self) -> None:
         """Expose an unambiguous post-initialization signal for runtime checks."""
+        _write_marker(_READY_MARKER, _marker_identity())
+        self._onebot_monitor_task = asyncio.create_task(self._monitor_onebot_connection())
         logger.info("Yuuk1 Core ready")
+
+    async def _monitor_onebot_connection(self) -> None:
+        """Sample the v4.28.2 adapter's post-handshake WebSocket registry."""
+        error_reported = False
+        while True:
+            try:
+                _write_marker(
+                    _ONEBOT_MARKER,
+                    {
+                        **_marker_identity(),
+                        "sampled_monotonic_ns": time.monotonic_ns(),
+                        "connected": _onebot_clients_connected(self.context),
+                    },
+                )
+                error_reported = False
+            except Exception:
+                # Diagnostic sampling must not interrupt the bot or reveal runtime data.
+                try:
+                    _write_marker(
+                        _ONEBOT_MARKER,
+                        {
+                            **_marker_identity(),
+                            "sampled_monotonic_ns": time.monotonic_ns(),
+                            "connected": False,
+                        },
+                    )
+                except Exception:
+                    _remove_marker(_ONEBOT_MARKER)
+                if not error_reported:
+                    logger.warning("Yuuk1 could not sample OneBot connection state.")
+                    error_reported = True
+            await asyncio.sleep(2)
 
     @staticmethod
     def _is_qq(event: AstrMessageEvent) -> bool:
@@ -253,6 +345,15 @@ class Yuuk1CorePlugin(Star):
 
     async def terminate(self) -> None:
         """AstrBot calls this during plugin unload; discard in-memory rate buckets."""
+        if self._onebot_monitor_task is not None:
+            self._onebot_monitor_task.cancel()
+            try:
+                await self._onebot_monitor_task
+            except asyncio.CancelledError:
+                pass
+            self._onebot_monitor_task = None
+        _remove_marker(_ONEBOT_MARKER)
+        _remove_marker(_READY_MARKER)
         global _ACTIVE_SETTINGS
         if _ACTIVE_SETTINGS is self.settings:
             _ACTIVE_SETTINGS = None

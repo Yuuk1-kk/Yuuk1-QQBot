@@ -2,7 +2,7 @@
 
 基于 AstrBot、NapCatQQ、OneBot v11 Reverse WebSocket 和 DeepSeek 的 QQ 群 AI Bot 项目。AstrBot 负责运行时、平台适配、Provider、会话和 WebUI；项目定制逻辑只放在 Star 插件中。
 
-**Status: v0.1 Release Candidate · Ready for manual integration.** 运行时镜像引用已锁定；容器启动、插件实际加载、QQ 登录和 DeepSeek 请求仍须在具备 Docker 与本人凭据的环境中核验，结果见 [PROGRESS.md](PROGRESS.md)。
+**Status: v0.1 stabilization VERIFIED.** Docker、插件、DeepSeek ChatUI、QQ 群 E2E，以及 NapCat 重建后的自动登录、OneBot 重连和群聊回复均已真实通过；结果见 [PROGRESS.md](PROGRESS.md)。
 
 ## 架构
 
@@ -51,7 +51,7 @@ notepad .env
 .\scripts\doctor.ps1
 ```
 
-打开 AstrBot WebUI `http://127.0.0.1:6185`，按首次启动日志登录并修改初始密码。确认 Yuuk1 Core 出现在插件列表，再配置 DeepSeek Provider / Profile 和 OneBot v11 Adapter。打开 NapCat WebUI `http://127.0.0.1:6099/webui`，用 Bot QQ 扫码登录。最后设置群白名单与项目管理员，在允许的 QQ 群中验证 @Bot、命令和 AI 回复。具体顺序见 [部署指南](docs/SETUP.md)。
+打开 AstrBot WebUI `http://127.0.0.1:6185`，按首次启动日志登录并修改初始密码。确认 Yuuk1 Core 出现在插件列表，再配置 DeepSeek Provider / Profile 和 OneBot v11 Adapter。打开 NapCat WebUI `http://127.0.0.1:6099/webui`，用 Bot QQ 扫码登录，并在 WebUI 中选择自动登录账号以便容器重建后恢复。最后设置群白名单与项目管理员，在允许的 QQ 群中验证 @Bot、命令和 AI 回复。具体顺序见 [部署指南](docs/SETUP.md)。
 
 详细步骤见 [部署指南](docs/SETUP.md)、[NapCat 指南](docs/NAPCAT.md) 和 [DeepSeek 指南](docs/DEEPSEEK.md)。
 
@@ -71,7 +71,7 @@ notepad .env
 | `scripts/bootstrap.ps1` | 检查 Docker / Compose，创建 `.env` 占位文件和数据目录 |
 | `scripts/start.ps1` | 校验 Compose 并启动服务 |
 | `scripts/stop.ps1` | 停止并移除容器，保留 `data/` |
-| `scripts/restart.ps1` | 重新创建并启动容器，保留 `data/` |
+| `scripts/restart.ps1` | 确认已选择 NapCat 自动登录账号后重新创建容器，保留 `data/`；`-AllowQRRelogin` 显式允许再次扫码 |
 | `scripts/logs.ps1` | 查看全部或指定服务日志 |
 | `scripts/doctor.ps1` | 输出 `[PASS]`、`[WARN]`、`[FAIL]`、`[MANUAL]` 诊断状态 |
 | `scripts/backup.ps1` | 停机后备份 AstrBot 数据和 NapCat 配置到忽略的 `backups/` |
@@ -82,12 +82,12 @@ notepad .env
 ```powershell
 python -m pip install -r dev-requirements.txt
 python -m pytest
-python -m ruff check plugins tests
+python -m ruff check plugins scripts tests
 ```
 
 ## 项目状态
 
-静态验证、运行时阻塞和必须本人完成的集成步骤见 [PROGRESS.md](PROGRESS.md)。`doctor.ps1` 的网络检查不能代替真实 QQ 群消息与 DeepSeek 请求验证。
+真实集成与重建后群聊验证结果见 [PROGRESS.md](PROGRESS.md)。`doctor.ps1` 不会发送计费模型请求。
 
 ## 安全
 

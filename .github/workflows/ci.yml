@@ -23,11 +23,11 @@ jobs:
       - name: Install development dependencies
         run: python -m pip install -r dev-requirements.txt
       - name: Python syntax
-        run: python -m compileall -q plugins tests
+        run: python -m compileall -q plugins scripts tests
       - name: Unit tests
         run: python -m pytest -q
       - name: Ruff
-        run: ruff check plugins tests
+        run: ruff check plugins scripts tests
       - name: Validate Star metadata and configuration schema
         run: |
           python - <<'PY'
@@ -130,10 +130,17 @@ jobs:
           PY
 
   powershell:
-    name: PowerShell syntax
+    name: PowerShell syntax and doctor status
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: dev-requirements.txt
+      - name: Install development dependencies
+        run: python -m pip install -r dev-requirements.txt
       - name: Parse every management script
         shell: pwsh
         run: |
@@ -152,3 +159,5 @@ jobs:
             $allErrors | Format-List
             exit 1
           }
+      - name: PowerShell runtime fixture tests
+        run: python -m pytest -q tests/test_doctor_status.py tests/test_restart_guard.py

@@ -8,6 +8,8 @@
 
 NapCat WebUI 默认在 `http://127.0.0.1:6099/webui`。NapCat 的 QQ 登录态保存在 `data/napcat/qq`，运行配置保存在 `data/napcat/config`；整个 `data/` 已从 Git 排除。不要把 6099 映射到公网。
 
+扫码登录后，在 NapCat WebUI 为当前账号设置“自动登录账号”。QQ 文件持久化只是快速登录的前提；NapCat v4.18.33 还需要一个账号选择，才能在容器重建时尝试恢复登录。WebUI 的选择写入已持久化的 `data/napcat/config/webui.json`。不要将 QQ 号、二维码、WebUI Token 或登录文件提交到 Git。`restart.ps1` 在未选择自动登录账号时会拒绝重建；只有你明确接受再次扫码时才使用 `-AllowQRRelogin`。
+
 端口可在 `.env` 中修改。默认绑定 `127.0.0.1`；只有在已有受控 VPN/防火墙等访问路径时才调整 bind 地址。
 
 ## OneBot v11 Reverse WebSocket
@@ -27,11 +29,13 @@ Compose 中的 `astrbot` 是 Docker 服务名。不要改成容器里的 `localh
 ## 如何验证
 
 1. `docker compose ps` 显示两个服务为 running。
-2. AstrBot Data & Logs → Logs 中看到 OneBot v11 Adapter 已连接的日志；日志措辞可能因版本不同。
-3. `scripts/doctor.ps1` 检查容器、网络和已连接的日志证据。
+2. `scripts/doctor.ps1` 只读检查 NapCat 在线 API、AstrBot Adapter 配置和监听，以及当前 NapCat 到 AstrBot 的持久连接；历史连接日志不会单独判 PASS。
+3. AstrBot Data & Logs → Logs 可补充查看 OneBot v11 Adapter 已连接的日志。
 4. NapCat 已扫码登录后，在白名单群测试 @Bot 或回复 Bot。
 
-日志和网络检查只能验证连接的部分证据；QQ 已登录及群消息往返需要人工确认。等待扫码应显示为 `[MANUAL]`，不是服务失败。
+NapCat WebUI 状态 API 能确认当前 QQ 登录且 Core 在线；接口受双重验证保护或不可用时 doctor 会保留 `[MANUAL]`。群消息往返仍需真实群聊验证。
+
+doctor 每次检查都需在本机向 NapCat WebUI 鉴权一次；NapCat v4.18.33 对鉴权按分钟限流。若短时间连续运行后出现 `[MANUAL]`，等待约一分钟再试，避免将限流误认作 QQ 离线。doctor 不保存临时凭证。
 
 ## 常见问题
 
@@ -39,4 +43,5 @@ Compose 中的 `astrbot` 是 Docker 服务名。不要改成容器里的 `localh
 - **配置写了 localhost：**容器中的 localhost 指自己。NapCat 必须连服务名 `astrbot`。
 - **WebUI 打不开：**检查服务状态和 `.env` 中端口；若端口冲突，改 `ASTRBOT_WEBUI_PORT` 或 `NAPCAT_WEBUI_PORT` 再重启。
 - **扫码/登录失败：**查看 `scripts/logs.ps1 -Service napcat`；按 NapCat 当前版本支持的客户端与登录规则处理。
+- **重建后要求再次扫码：**先检查 doctor 的 `NapCat QQ data mount` 与 `NapCat quick login`。挂载正常但自动登录账号未选择时，在 NapCat WebUI 选定当前账号，扫码后再运行 `restart.ps1` 验证。
 - **QQ 已登录但 Bot 不回话：**确认 OneBot 已连接、AstrBot Profile 已选择模型、Yuuk1 Core 已加载、当前群号在 `allowed_groups` 中且触发方式符合 AstrBot Profile 设置；默认 QQ 私聊关闭，并检查用户级与群级限流。

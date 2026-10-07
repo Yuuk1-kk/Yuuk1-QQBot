@@ -138,6 +138,35 @@ class AstrBotPluginRegistrationTests(unittest.TestCase):
             command_group.custom_filters[0], plugin.Yuuk1CommandAllowlistFilter
         )
 
+        client_registry: dict[str, object] = {}
+        adapter = types.SimpleNamespace(
+            bot=types.SimpleNamespace(_wsr_api_clients=client_registry)
+        )
+
+        class FakeContext:
+            def get_config(self):
+                return {
+                    "platform": [
+                        {
+                            "id": "renamed-napcat",
+                            "type": "aiocqhttp",
+                            "enable": True,
+                            "ws_reverse_port": 6199,
+                        }
+                    ]
+                }
+
+            def get_platform_inst(self, platform_id):
+                assert platform_id == "renamed-napcat"
+                return adapter
+
+        context = FakeContext()
+        self.assertFalse(plugin._onebot_clients_connected(context))
+        client_registry["opaque-id"] = object()
+        self.assertTrue(plugin._onebot_clients_connected(context))
+        client_registry.clear()
+        self.assertFalse(plugin._onebot_clients_connected(context))
+
 
 if __name__ == "__main__":
     unittest.main()

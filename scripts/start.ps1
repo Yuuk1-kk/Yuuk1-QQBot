@@ -11,6 +11,10 @@ if (-not (Test-Path -LiteralPath (Join-Path $repoRoot '.env'))) {
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
     throw '未找到 Docker CLI。请先安装并启动 Docker Desktop。'
 }
+$qqDataPath = Join-Path $repoRoot 'data/napcat/qq'
+if (-not (Test-Path -LiteralPath $qqDataPath -PathType Container)) {
+    throw 'NapCat QQ 持久化目录不存在；请先运行 .\scripts\bootstrap.ps1。'
+}
 
 docker compose config --quiet
 if ($LASTEXITCODE -ne 0) { throw 'compose.yml 校验失败；请检查配置和 .env。' }
