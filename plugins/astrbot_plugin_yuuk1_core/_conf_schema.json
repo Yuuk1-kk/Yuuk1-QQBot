@@ -29,6 +29,30 @@
     "default": "请友好、自然地参与群聊，优先简洁回答；不确定时明确说明。尊重用户隐私，不声称执行了无法验证的操作。",
     "hint": "作为稳定的人格补充追加到 AstrBot 当前会话提示词后，不会替换 AstrBot Profile / Persona。"
   },
+  "group_identity_enabled": {
+    "description": "启用群成员身份上下文",
+    "type": "bool",
+    "default": true,
+    "hint": "仅在 allowed_groups 中根据发言人名称区分群友；不建立个人事实或人物画像。"
+  },
+  "group_identity_persistence_enabled": {
+    "description": "持久化群成员身份",
+    "type": "bool",
+    "default": true,
+    "hint": "将匿名化成员键、当前显示名和有限曾用名保存在 AstrBot data/plugin_data 中；不会保存 QQ 号或群号。"
+  },
+  "group_identity_max_aliases": {
+    "description": "每名成员最多保留曾用名数量",
+    "type": "int",
+    "default": 5,
+    "hint": "有效范围 0 至 5；只保留历史显示名，不生成个人事实记忆。"
+  },
+  "group_identity_max_members_per_group": {
+    "description": "每群最多记录成员数",
+    "type": "int",
+    "default": 500,
+    "hint": "最多 500 名成员；达到上限后仅对新成员使用本次运行内的临时身份，不再持久化记录。"
+  },
   "rate_limit_enabled": {
     "description": "启用 QQ 请求限流",
     "type": "bool",

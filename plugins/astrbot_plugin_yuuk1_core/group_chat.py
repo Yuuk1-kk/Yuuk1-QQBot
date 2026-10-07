@@ -8,8 +8,9 @@ import secrets
 import time
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field
-from datetime import datetime
 from typing import Any
+
+from .group_identity import normalize_display_name, sanitize_display_name
 
 JINGJING_ALIASES = ("鲸鲸", "大肥鱼", "蓝色大肥鱼", "小鲸", "鲸鱼娘")
 _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
@@ -145,17 +146,18 @@ class GroupMessage:
     mentions_jingjing: bool
     at_bot: bool
     is_bot: bool = False
-    sender_token: str = field(default="", repr=False)
+    member_key: str = field(default="", repr=False)
+    identity_scope_key: str = field(default="", repr=False)
+    reply_target_member_key: str = field(default="", repr=False)
+    reply_target_display_name: str = ""
     received_monotonic: float = field(default=0.0, repr=False)
 
     def as_prompt_dict(self) -> dict[str, object]:
         return {
-            "time": datetime.fromtimestamp(self.timestamp).strftime("%H:%M:%S"),
+            "role": "bot" if self.is_bot else "human",
             "sender": self.sender,
             "text": self.text,
-            "mentions_jingjing": self.mentions_jingjing,
-            "at_bot": self.at_bot,
-            "is_bot": self.is_bot,
+            "reply_target": self.reply_target_display_name or None,
         }
 
 
@@ -170,7 +172,7 @@ class _GroupState:
     last_activity_wall: float | None = None
     last_idle_attempt_at: float | None = None
     last_engaged_at: float | None = None
-    last_engaged_sender_token: str | None = None
+    last_engaged_member_key: str | None = None
     last_bot_turn_text: str = ""
     last_bot_turn_timestamp: float | None = None
     last_bot_turn_received_monotonic: float | None = None
@@ -181,6 +183,107 @@ def sanitize_text(value: object, limit: int = _MAX_MESSAGE_CHARS) -> str:
     if not isinstance(value, str):
         return ""
     return _CONTROL_CHARS.sub("", value).strip()[:limit]
+
+
+@dataclass(frozen=True, slots=True)
+class SafeGroupMessage:
+    """Sanitized message parts plus IDs retained only for local HMAC lookup."""
+
+    text: str
+    at_bot: bool
+    reply_target_user_id: str = field(default="", repr=False)
+    reply_target_display_name: str = ""
+
+
+_FLATTENED_AT_ID = re.compile(r"@([^\s()]{1,64})\((\d{5,20}|all)\)")
+
+
+def contains_flattened_at_id(value: object) -> bool:
+    """Return whether adapter-flattened mention text embeds a platform ID."""
+    return isinstance(value, str) and bool(_FLATTENED_AT_ID.search(value))
+
+
+def _safe_flattened_at_name(match: re.Match[str]) -> str:
+    target = match.group(2)
+    if target == "all":
+        return "@全体成员"
+    name = sanitize_display_name(match.group(1), forbidden_values=(target,))
+    return f"@{name or '群友'}"
+
+
+def _safe_fallback_text(value: object) -> str:
+    text = sanitize_text(value)
+    return _FLATTENED_AT_ID.sub(_safe_flattened_at_name, text)
+
+
+def sanitize_flattened_message_text(value: object) -> str:
+    """Remove IDs from adapter-flattened @name(id) message text."""
+    return _safe_fallback_text(value)
+
+
+def extract_group_message(
+    components: object,
+    *,
+    self_id: object,
+    fallback_text: object = "",
+) -> SafeGroupMessage:
+    """Extract plain content, safe At names, and an optional Reply target."""
+    if not isinstance(components, (list, tuple)):
+        return SafeGroupMessage(_safe_fallback_text(fallback_text), False)
+    if not components:
+        return SafeGroupMessage("", False)
+
+    self_value = str(self_id or "").strip()
+    parts: list[str] = []
+    at_bot = False
+    reply_target_user_id = ""
+    reply_target_display_name = ""
+    for component in components:
+        name = type(component).__name__.lower()
+        component_type = str(getattr(component, "type", "")).lower()
+        if name == "plain" or component_type == "plain":
+            parts.append(sanitize_text(getattr(component, "text", "")))
+        elif name == "at" or component_type in {"at", "componenttype.at"}:
+            target = str(getattr(component, "qq", "") or "").strip()
+            is_target_bot = bool(self_value and target == self_value)
+            at_bot = at_bot or is_target_bot
+            target_name = sanitize_display_name(
+                getattr(component, "name", ""),
+                forbidden_values=(target, self_value),
+            )
+            if target == "all":
+                target_name = "全体成员"
+            parts.append("@鲸鲸" if is_target_bot else f"@{target_name or '群友'}")
+        elif name == "reply" or component_type in {"reply", "componenttype.reply"}:
+            raw_sender_id = str(getattr(component, "sender_id", "") or "").strip()
+            if raw_sender_id and raw_sender_id != "0":
+                reply_target_user_id = raw_sender_id
+            if raw_sender_id and self_value and raw_sender_id == self_value:
+                reply_target_display_name = "鲸鲸"
+            else:
+                reply_target_display_name = sanitize_display_name(
+                    getattr(component, "sender_nickname", ""),
+                    forbidden_values=(raw_sender_id, self_value),
+                )
+            parts.append("[引用消息]")
+        elif name == "image" or component_type == "image":
+            parts.append("[图片]")
+        elif name in {"record", "audio"} or component_type in {"record", "audio"}:
+            parts.append("[语音]")
+        elif name == "video" or component_type == "video":
+            parts.append("[视频]")
+        elif name == "file" or component_type == "file":
+            parts.append("[文件]")
+        elif name == "face" or component_type == "face":
+            parts.append("[表情]")
+        else:
+            parts.append("[其他消息]")
+    return SafeGroupMessage(
+        text=sanitize_text(" ".join(part for part in parts if part)),
+        at_bot=at_bot,
+        reply_target_user_id=reply_target_user_id,
+        reply_target_display_name=reply_target_display_name,
+    )
 
 
 def contains_jingjing_alias(text: str) -> bool:
@@ -340,41 +443,13 @@ def extract_safe_message(
     self_id: object,
     fallback_text: object = "",
 ) -> tuple[str, bool]:
-    """Read only plain text and safe media placeholders from AstrBot components."""
-    if not isinstance(components, (list, tuple)):
-        return sanitize_text(fallback_text), False
-    if not components:
-        return "", False
-
-    parts: list[str] = []
-    at_bot = False
-    for component in components:
-        name = type(component).__name__.lower()
-        component_type = str(getattr(component, "type", "")).lower()
-        if name == "plain" or component_type == "plain":
-            parts.append(sanitize_text(getattr(component, "text", "")))
-        elif name == "at" or component_type == "at":
-            target = getattr(component, "qq", "")
-            is_target_bot = bool(str(self_id or "") and str(target) == str(self_id))
-            at_bot = at_bot or is_target_bot
-            parts.append("@鲸鲸" if is_target_bot else "@群友")
-        elif name == "image" or component_type == "image":
-            parts.append("[图片]")
-        elif name == "reply" or component_type == "reply":
-            parts.append("[引用消息]")
-        elif name in {"record", "audio"} or component_type in {"record", "audio"}:
-            parts.append("[语音]")
-        elif name == "video" or component_type == "video":
-            parts.append("[视频]")
-        elif name == "file" or component_type == "file":
-            parts.append("[文件]")
-        elif name == "face" or component_type == "face":
-            parts.append("[表情]")
-        else:
-            parts.append("[其他消息]")
-
-    safe_text = sanitize_text(" ".join(part for part in parts if part))
-    return safe_text, at_bot
+    """Compatibility wrapper returning sanitized text and @Bot detection."""
+    message = extract_group_message(
+        components,
+        self_id=self_id,
+        fallback_text=fallback_text,
+    )
+    return message.text, message.at_bot
 
 
 class GroupContextBuffer:
@@ -415,11 +490,11 @@ class GroupContextBuffer:
     def _sender_label(
         self,
         state: _GroupState,
-        sender_key: object,
+        member_key: str,
         display_name: object,
     ) -> str:
-        name = sanitize_text(display_name, 32)
-        key = self.sender_token(sender_key)
+        name = sanitize_display_name(display_name)
+        key = member_key
         if name:
             return name
         if key and key in state.aliases:
@@ -454,6 +529,10 @@ class GroupContextBuffer:
         timestamp: float,
         now: float,
         at_bot: bool = False,
+        member_key: str = "",
+        identity_scope_key: str = "",
+        reply_target_member_key: str = "",
+        reply_target_display_name: str = "",
     ) -> GroupMessage | None:
         state = self._state(session, create=True)
         if state is None:
@@ -462,13 +541,17 @@ class GroupContextBuffer:
         safe_text = sanitize_text(text)
         if not safe_text:
             return None
+        safe_member_key = member_key or self.sender_token(sender_key)
         message = GroupMessage(
             timestamp=timestamp,
-            sender=self._sender_label(state, sender_key, display_name),
+            sender=self._sender_label(state, safe_member_key, display_name),
             text=safe_text,
             mentions_jingjing=contains_jingjing_alias(safe_text),
             at_bot=at_bot,
-            sender_token=self.sender_token(sender_key),
+            member_key=safe_member_key,
+            identity_scope_key=identity_scope_key,
+            reply_target_member_key=reply_target_member_key,
+            reply_target_display_name=reply_target_display_name,
             received_monotonic=now,
         )
         state.messages.append(message)
@@ -484,7 +567,7 @@ class GroupContextBuffer:
         timestamp: float,
         now: float,
         text: object = "",
-        sender_key: object = None,
+        member_key: str = "",
         engage: bool = False,
     ) -> None:
         state = self._state(session, create=False)
@@ -500,13 +583,14 @@ class GroupContextBuffer:
                 mentions_jingjing=False,
                 at_bot=False,
                 is_bot=True,
+                member_key="bot",
                 received_monotonic=now,
             )
         )
         state.last_bot_human_count = state.human_count
         if engage:
             state.last_engaged_at = now
-            state.last_engaged_sender_token = self.sender_token(sender_key) or None
+            state.last_engaged_member_key = member_key or None
             state.last_bot_turn_text = safe_text
             state.last_bot_turn_timestamp = timestamp
             state.last_bot_turn_received_monotonic = now
@@ -527,7 +611,7 @@ class GroupContextBuffer:
             return False, False
         if now - state.last_engaged_at >= max(0, int(timeout_seconds)):
             state.last_engaged_at = None
-            state.last_engaged_sender_token = None
+            state.last_engaged_member_key = None
             state.last_bot_turn_text = ""
             state.last_bot_turn_timestamp = None
             state.last_bot_turn_received_monotonic = None
@@ -562,19 +646,19 @@ class GroupContextBuffer:
                 mentions_jingjing=False,
                 at_bot=False,
                 is_bot=True,
+                member_key="bot",
                 received_monotonic=state.last_bot_turn_received_monotonic or now,
             )
             recent.insert(0, last_bot)
         return select_engagement_context(recent, recent_limit=recent_limit)
 
-    def same_as_last_engaged_user(self, session: str, sender_key: object) -> bool:
+    def same_as_last_engaged_user(self, session: str, member_key: str) -> bool:
         state = self._state(session)
-        current_token = self.sender_token(sender_key)
         return bool(
             state
-            and current_token
-            and state.last_engaged_sender_token
-            and current_token == state.last_engaged_sender_token
+            and member_key
+            and state.last_engaged_member_key
+            and member_key == state.last_engaged_member_key
         )
 
     def last_bot_turn_text(self, session: str) -> str:
@@ -660,15 +744,76 @@ def decision_says_speak(response_text: object) -> bool:
     return bool(first and first[0].strip("`*_ ").upper() == "SPEAK")
 
 
-def format_context(messages: tuple[GroupMessage, ...] | list[GroupMessage]) -> str:
-    """Serialize only the bounded, redacted summaries for one temporary prompt."""
-    import json
+def _short_member_tag(member_key: str, used_tags: set[str]) -> str:
+    digest = member_key.rsplit("_", 1)[-1]
+    for length in (4, 6, 8, 12, 16):
+        tag = digest[-length:].upper()
+        if tag not in used_tags:
+            used_tags.add(tag)
+            return tag
+    return digest[-16:].upper()
 
-    return json.dumps(
-        [message.as_prompt_dict() for message in messages],
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
+
+def format_context(
+    messages: tuple[GroupMessage, ...] | list[GroupMessage],
+    *,
+    duplicate_member_keys: frozenset[str] | set[str] = frozenset(),
+) -> str:
+    """Render a bounded speaker-attributed transcript with no platform IDs."""
+    if not messages:
+        return ""
+    name_members: dict[str, set[str]] = {}
+    for message in messages:
+        if not message.is_bot and message.member_key:
+            normalized = normalize_display_name(message.sender)
+            if normalized:
+                name_members.setdefault(normalized, set()).add(message.member_key)
+
+    labels: dict[str, str] = {}
+    used_tags: set[str] = set()
+    for message in messages:
+        if message.is_bot:
+            continue
+        member_key = message.member_key
+        if member_key and member_key in labels:
+            continue
+        normalized = normalize_display_name(message.sender)
+        duplicate_in_context = len(name_members.get(normalized, ())) > 1
+        if member_key and (duplicate_in_context or member_key in duplicate_member_keys):
+            labels[member_key] = (
+                f"{sanitize_display_name(message.sender) or '群友'}"
+                f"#{_short_member_tag(member_key, used_tags)}"
+            )
+        elif member_key and member_key in labels:
+            continue
+        elif member_key:
+            labels[member_key] = sanitize_display_name(message.sender) or "群友"
+
+    lines: list[str] = []
+    for message in messages:
+        if message.is_bot:
+            label = "鲸鲸"
+        else:
+            label = labels.get(message.member_key, sanitize_display_name(message.sender) or "群友")
+        # Keep each transcript entry on one line so user supplied newlines
+        # cannot forge additional [speaker] records in the temporary prompt.
+        text = " ".join(sanitize_text(message.text).split())
+        if message.reply_target_display_name:
+            target = sanitize_display_name(message.reply_target_display_name) or "群友"
+            target_key = message.reply_target_member_key
+            target_name_members = name_members.get(normalize_display_name(target), set())
+            if (
+                target_key
+                and target_key != "bot"
+                and target_name_members
+                and (target_key not in target_name_members or len(target_name_members) > 1)
+            ):
+                target = f"{target}#{_short_member_tag(target_key, used_tags)}"
+            elif target == "群友" and target_key and target_key != "bot":
+                target = f"{target}#{_short_member_tag(target_key, used_tags)}"
+            text = f"回复 [{target}]：{text}"
+        lines.append(f"[{label}] {text}")
+    return "\n".join(lines)
 
 
 def tool_is_allowed(persona_tools: Any, tool_name: str) -> bool:

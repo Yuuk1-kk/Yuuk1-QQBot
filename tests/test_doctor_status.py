@@ -21,6 +21,8 @@ FUNCTIONS = {
     "Get-DoctorPluginState",
     "Get-DoctorOneBotState",
     "Get-DoctorDeepSeekState",
+    "Get-DoctorIdentitySecretState",
+    "Get-DoctorIdentityStoreState",
 }
 
 
@@ -104,11 +106,39 @@ def test_deepseek_requires_enabled_source_key_reference_model_and_default() -> N
         "key_reference_valid": True,
         "model_enabled": True,
         "default_selected": True,
-    }
+            }
     states = [configured, *(configured | {key: False} for key in configured)]
     results, _ = _evaluate("Get-DoctorDeepSeekState", states)
     assert results[0]["Level"] == "PASS"
     assert all(result["Level"] != "PASS" for result in results[1:])
+
+
+def test_identity_status_requires_persistent_secret_and_healthy_loaded_store() -> None:
+    configured = {
+        "identity_enabled": True,
+        "identity_persistence_enabled": True,
+        "identity_secret_available": True,
+        "identity_loaded": True,
+        "identity_healthy": True,
+        "identity_known_members": 8,
+    }
+    results, _ = _evaluate(
+        "Get-DoctorIdentitySecretState",
+        [configured, configured | {"identity_secret_available": False}],
+    )
+    assert [item["Level"] for item in results] == ["PASS", "FAIL"]
+    results, output = _evaluate(
+        "Get-DoctorIdentityStoreState",
+        [
+            configured,
+            configured | {"identity_loaded": False},
+            configured | {"identity_healthy": False},
+            configured | {"identity_persistence_enabled": False},
+        ],
+    )
+    assert [item["Level"] for item in results] == ["PASS", "WARN", "FAIL", "MANUAL"]
+    assert "known_members=8" in output
+    assert "member_" not in output
 
 
 @pytest.mark.parametrize("function_name", sorted(FUNCTIONS))
@@ -131,6 +161,12 @@ def test_status_details_never_echo_secret_or_raw_config(function_name: str) -> N
         "key_reference_valid": True,
         "model_enabled": True,
         "default_selected": True,
+        "identity_enabled": True,
+        "identity_persistence_enabled": True,
+        "identity_secret_available": True,
+        "identity_loaded": True,
+        "identity_healthy": True,
+        "identity_known_members": 8,
         "api_key": sentinel,
         "raw_config": {"secret": sentinel},
     }
@@ -138,6 +174,8 @@ def test_status_details_never_echo_secret_or_raw_config(function_name: str) -> N
         "Get-DoctorPluginState": "ready_current",
         "Get-DoctorOneBotState": "websocket_connected",
         "Get-DoctorDeepSeekState": "key_reference_valid",
+        "Get-DoctorIdentitySecretState": "identity_secret_available",
+        "Get-DoctorIdentityStoreState": "identity_healthy",
     }[function_name]
     results, output = _evaluate(
         function_name, [state, state | {missing_field: False}]

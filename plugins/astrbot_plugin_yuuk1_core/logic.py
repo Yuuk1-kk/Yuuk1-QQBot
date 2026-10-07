@@ -125,6 +125,10 @@ class CoreSettings:
     allow_private_chat: bool
     admin_users: frozenset[str]
     system_prompt: str
+    group_identity_enabled: bool
+    group_identity_persistence_enabled: bool
+    group_identity_max_aliases: int
+    group_identity_max_members_per_group: int
     rate_limit_enabled: bool
     rate_limit_window: int
     rate_limit_requests: int
@@ -166,6 +170,18 @@ def normalize_config(config: Mapping[str, object] | None) -> CoreSettings:
         allow_private_chat=_bool_value(values.get("allow_private_chat", False), False),
         admin_users=normalize_ids(values.get("admin_users", [])),
         system_prompt=system_prompt,
+        group_identity_enabled=_bool_value(
+            values.get("group_identity_enabled", True), True
+        ),
+        group_identity_persistence_enabled=_bool_value(
+            values.get("group_identity_persistence_enabled", True), True
+        ),
+        group_identity_max_aliases=_nonnegative_int(
+            values.get("group_identity_max_aliases", 5), 5, 5
+        ),
+        group_identity_max_members_per_group=_positive_int(
+            values.get("group_identity_max_members_per_group", 500), 500, 500
+        ),
         rate_limit_enabled=_bool_value(values.get("rate_limit_enabled", True), True),
         rate_limit_window=_positive_int(values.get("rate_limit_window", 60), 60, 86_400),
         rate_limit_requests=_positive_int(values.get("rate_limit_requests", 30), 30, 10_000),

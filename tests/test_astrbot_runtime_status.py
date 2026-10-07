@@ -59,6 +59,50 @@ def test_ready_marker_requires_the_current_process_start_tick(tmp_path: Path) ->
     assert not PROBE["current_connection_marker"](marker, proc, 12_000_000_000)
 
 
+def test_identity_marker_returns_only_current_process_safe_status(tmp_path: Path) -> None:
+    proc = tmp_path / "proc"
+    process = proc / "1"
+    process.mkdir(parents=True)
+    (process / "stat").write_text(
+        "1 (AstrBot runtime) S " + " ".join(["0"] * 18 + ["12345"]),
+        encoding="utf-8",
+    )
+    marker = tmp_path / "identity.json"
+    marker.write_text(
+        json.dumps(
+            {
+                "pid": 1,
+                "start_ticks": "12345",
+                "identity_enabled": True,
+                "persistence_enabled": True,
+                "loaded": True,
+                "healthy": True,
+                "secret_available": True,
+                "known_members": 8,
+                "secret": "runtime-private-secret",
+                "member_key": "raw-private-member-id",
+            }
+        ),
+        encoding="utf-8",
+    )
+    status = PROBE["current_identity_marker"](marker, proc)
+    assert status == {
+        "identity_enabled": True,
+        "identity_persistence_enabled": True,
+        "identity_loaded": True,
+        "identity_healthy": True,
+        "identity_secret_available": True,
+        "identity_known_members": 8,
+    }
+    assert "runtime-private-secret" not in json.dumps(status)
+    assert "raw-private-member-id" not in json.dumps(status)
+    marker.write_text(
+        json.dumps({"pid": 9, "start_ticks": "12345", "healthy": True}),
+        encoding="utf-8",
+    )
+    assert not PROBE["current_identity_marker"](marker, proc)
+
+
 def test_deepseek_and_onebot_probe_checks_links_without_returning_secrets(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

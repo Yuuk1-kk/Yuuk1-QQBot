@@ -52,8 +52,9 @@ class _Plain:
 class _At:
     type = "At"
 
-    def __init__(self, qq: str) -> None:
+    def __init__(self, qq: str, name: str = "") -> None:
         self.qq = qq
+        self.name = name
 
 
 class _CustomFilter:
@@ -188,6 +189,9 @@ class AstrBotPluginRegistrationTests(unittest.TestCase):
         provider.ProviderRequest = object
         star.Context = object
         star.Star = _Star
+        star.StarTools = SimpleNamespace(
+            get_data_dir=lambda _plugin_name: Path("/tmp/yuuk1-test-data")
+        )
         message_components.Image = _Image
         message_components.Plain = _Plain
         core_agent_message.TextPart = _TextPart
@@ -254,6 +258,7 @@ class AstrBotPluginRegistrationTests(unittest.TestCase):
                 group_id="12345",
                 sender_id="synthetic-user",
                 self_id="synthetic-bot",
+                sender_name="测试群友",
             ):
                 self.extras = {}
                 for name, value in (attributes or {}).items():
@@ -268,6 +273,7 @@ class AstrBotPluginRegistrationTests(unittest.TestCase):
                 self.group_id = group_id
                 self.sender_id = sender_id
                 self.self_id = self_id
+                self.sender_name = sender_name
                 self.request_llm_calls = 0
                 self.stopped = False
                 self._has_send_oper = False
@@ -288,7 +294,7 @@ class AstrBotPluginRegistrationTests(unittest.TestCase):
                 return "aiocqhttp"
 
             def get_sender_name(self):
-                return "测试群友"
+                return self.sender_name
 
             def request_llm(self, **_):
                 self.request_llm_calls += 1
@@ -366,7 +372,7 @@ class AstrBotPluginRegistrationTests(unittest.TestCase):
             context = FakeContext(send_error=True)
             disabled_instance = plugin.Yuuk1CorePlugin(
                 context,
-                {"allowed_groups": ["12345"], "stickers_enabled": True},
+                {"allowed_groups": ["12345"], "stickers_enabled": True, "group_identity_enabled": False},
             )
             allowed_event = FakeEvent()
             assert not observer_filter.filter(allowed_event, {})
@@ -381,6 +387,22 @@ class AstrBotPluginRegistrationTests(unittest.TestCase):
                 },
             )
             assert observer_filter.filter(allowed_event, {})
+
+            # Identity-only operation updates names without retaining ordinary
+            # message text when Free Talk and Idle Presence are disabled.
+            identity_only_instance = plugin.Yuuk1CorePlugin(
+                context,
+                {"allowed_groups": ["12345"], "group_identity_enabled": True},
+            )
+            identity_only_event = FakeEvent(message_str="identity-only message")
+            assert observer_filter.filter(identity_only_event, {})
+            assert [
+                item async for item in identity_only_instance.on_group_message(identity_only_event)
+            ] == []
+            assert identity_only_instance.group_identity.known_member_count() == 1
+            assert identity_only_instance.group_context.recent(
+                identity_only_event.unified_msg_origin, now=time.monotonic()
+            ) == ()
 
             # Error logs must never serialize exception/traceback text, which
             # may contain user messages, prompts, provider IDs, or credentials.
@@ -469,8 +491,8 @@ class AstrBotPluginRegistrationTests(unittest.TestCase):
             )
             direct_context.decision = "SILENT"
             direct_events = (
-                FakeEvent(message_str="大肥鱼下士出列！"),
-                FakeEvent(message_str="鲸鲸你觉得呢"),
+                FakeEvent(message_str="大肥鱼下士出列！", sender_name="奶龙鉴赏家"),
+                FakeEvent(message_str="鲸鲸你觉得呢", sender_name="Yuuk1"),
             )
             with (
                 patch.object(plugin.random, "random", return_value=0.99),
@@ -487,6 +509,9 @@ class AstrBotPluginRegistrationTests(unittest.TestCase):
                     assert len(direct_yields) == 1
                     assert direct_event.request_llm_calls == 1
                     assert getattr(direct_event, plugin._ENGAGEMENT_PENDING_ATTR)
+                    current_message = getattr(direct_event, plugin._CURRENT_GROUP_MESSAGE_ATTR)
+                    assert current_message.sender == "奶龙鉴赏家"
+                    assert current_message.member_key.startswith("member_")
             assert direct_context.llm_calls == 0
             assert direct_instance.settings.free_talk_min_interval_seconds == 999
             assert direct_instance.settings.free_talk_decision_interval_seconds == 999
@@ -766,6 +791,18 @@ class AstrBotPluginRegistrationTests(unittest.TestCase):
                 timeout_seconds=300,
             )[0]
 
+            # Adapter-flattened mentions carry raw IDs; keep the native prompt
+            # on its display-name-only representation.
+            private_id_wake = FakeEvent(
+                message_str="@偷摸零(123456789) 看看",
+                components=[_At("synthetic-bot"), _At("123456789", "偷摸零"), _Plain("看看")],
+                is_at_or_wake_command=True,
+            )
+            assert [
+                item async for item in direct_instance.on_group_message(private_id_wake)
+            ] == []
+            assert private_id_wake.message_str == "@偷摸零 看看"
+            assert "123456789" not in private_id_wake.message_str
             # A slash command and a self message never reach the classifier.
             command_event = FakeEvent(
                 message_str="/yuuk1 status",
@@ -797,10 +834,23 @@ class AstrBotPluginRegistrationTests(unittest.TestCase):
                 text="前文含敏感测试标记",
                 mentions_jingjing=False,
                 at_bot=False,
+                member_key="member_" + "a" * 64,
                 received_monotonic=1,
             )
+            current_group_message = GroupMessage(
+                timestamp=2,
+                sender="奶龙鉴赏家",
+                text="当前消息内容",
+                mentions_jingjing=False,
+                at_bot=False,
+                member_key="member_" + "b" * 64,
+                received_monotonic=2,
+            )
             event_with_context = FakeEvent(
-                attributes={plugin._FREE_TALK_CONTEXT_ATTR: (message,)},
+                attributes={
+                    plugin._FREE_TALK_CONTEXT_ATTR: (message,),
+                    plugin._CURRENT_GROUP_MESSAGE_ATTR: current_group_message,
+                },
             )
 
             class FakeToolSet:
@@ -820,6 +870,11 @@ class AstrBotPluginRegistrationTests(unittest.TestCase):
             assert "前文含敏感测试标记" not in request.system_prompt
             assert len(request.extra_user_content_parts) == 1
             assert request.extra_user_content_parts[0]._no_save
+            assert "当前群消息发送者：[奶龙鉴赏家]" in request.extra_user_content_parts[0].text
+            assert "[群友1] 前文含敏感测试标记" in request.extra_user_content_parts[0].text
+            assert "[奶龙鉴赏家] 当前消息内容" in request.extra_user_content_parts[0].text
+            assert "synthetic-user" not in request.extra_user_content_parts[0].text
+            assert "synthetic-bot" not in request.extra_user_content_parts[0].text
             assert tool_set.tools == {"web_search"}
             assert set(event_with_context.extras) == {plugin.PERSONA_ERROR_EXTRA_KEY}
             assert "前文含敏感测试标记" not in repr(event_with_context.extras)
@@ -889,6 +944,7 @@ class AstrBotPluginRegistrationTests(unittest.TestCase):
                 assert context.sent_messages[2][0].path == str(image_path)
             await instance.terminate()
             await disabled_instance.terminate()
+            await identity_only_instance.terminate()
 
         asyncio.run(_exercise_plugin_hooks())
 

@@ -58,10 +58,27 @@ At v4.28.2, `PluginManager.plugin_store_path` comes from `get_astrbot_plugin_pat
 
 - A plugin has a `metadata.yaml`, a `main.py` with a `Star` subclass, and optionally `_conf_schema.json`.
 - AstrBot loads schema config from `data/config/<plugin_name>_config.json` and passes it to the plugin constructor. The WebUI schema supports `string`, `text`, `int`, `float`, `bool`, `object`, `list`, and other documented types; `secret: true` masks but does not encrypt a field.
-- AstrBot's plugin guide says persistent plugin data belongs in the AstrBot data area, not the plugin source folder, since updates may replace plugin files. Yuuk1 Core has no custom durable state; rate-limit buckets stay in memory.
+- AstrBot's plugin guide says persistent plugin data belongs in the AstrBot data area, not the plugin source folder, since updates may replace plugin files. StarTools.get_data_dir(plugin_name) resolves to /AstrBot/data/plugin_data/<plugin_name> in the pinned runtime. Yuuk1 Group Identity Context v1 uses this path for a private HMAC secret and bounded JSON name store; rate-limit buckets and recent message context stay in memory.
 - The plugin uses `_conf_schema.json` (no custom Page), with JSON/list values normalized defensively.
 - A small two-level sliding-window limiter stays in memory: 3 admitted LLM requests per QQ user across groups and private chats, plus 15 per group, each over 60 seconds. Admission checks both capacities before recording either hit so one user hitting their personal quota does not spend more group quota. Private chats, when opted in, use only the user quota. The limits reset when the plugin process restarts.
 - The inspected upstream `pyproject.toml` configures Ruff, Pyright (`typeCheckingMode = basic`, Python 3.10), and pytest. This repository mirrors the Ruff rule families and line length, uses pytest for policy tests, and carries a matching Pyright basic-mode config. Pyright is not run in this workspace because the AstrBot SDK is supplied by the container runtime rather than installed into the local Python environment.
+
+
+### Group Identity Context v1 — VERIFIED: data and sender fields
+
+Pinned runtime inspection was performed inside the deployed AstrBot v4.28.2 container; no AstrBot Core changes are required:
+
+- Public AstrMessageEvent.get_sender_id() and get_sender_name() read message_obj.sender.user_id and message_obj.sender.nickname.
+- The pinned aiocqhttp conversion constructs MessageMember(str(event.sender["user_id"]), event.sender.get("card") or event.sender.get("nickname", "N/A")); the group card is preferred and nickname is the fallback. Yuuk1 reads only the public get_sender_name() value and treats N/A, empty, or unsafe values as “群友”.
+- At exposes its QQ target and display name; Reply exposes sender_id and sender_nickname after the adapter resolves the referenced message. Yuuk1 uses component display names in the temporary context and converts any target ID to HMAC locally. It never puts the target ID into the prompt.
+- StarTools.get_data_dir("astrbot_plugin_yuuk1_core") returned /AstrBot/data/plugin_data/astrbot_plugin_yuuk1_core in the current runtime. Compose binds ./data/astrbot:/AstrBot/data, so the durable host path is data/astrbot/plugin_data/astrbot_plugin_yuuk1_core/. Current plugin settings are at data/astrbot/config/astrbot_plugin_yuuk1_core_config.json.
+- identity_secret stores 32 random bytes as hex and is created with exclusive file creation and private permissions on POSIX. group_identity.json is a bounded schema-versioned JSON snapshot replaced atomically after a batched flush. The HMAC domains are separated for group scope and member key; each digest covers platform ID plus group ID and, for member keys, sender ID. Raw IDs are not written to the store, prompt, marker, or logs.
+- If a persisted store exists but identity_secret is missing or invalid, initialization fails closed, does not mint a replacement key, and does not overwrite the store. Doctor exposes only enabled/loaded/healthy/secret-available booleans and a safe member count.
+- AstrBot’s data bind mount survives service recreation. The existing stopped-service backup archives the whole AstrBot data directory, so migration/restore needs identity_secret, group_identity.json, and astrbot_plugin_yuuk1_core_config.json together. The backup consistency command was not run during active Runtime operation.
+
+User-confirmed QQ E2E passed for current sender identification, A/B speaker attribution, card rename propagation, identity restoration after AstrBot restart, persistence of both identity files, and ENGAGED continuity. Group Identity Context v1 is VERIFIED.
+
+Speaker attribution is rendered into temporary extra_user_content_parts as [display name] message, with bot messages always labeled [鲸鲸]. Duplicate current names receive a short HMAC-derived suffix only to disambiguate the context. Names are length-bounded and stripped of control/format characters and bracket delimiters; aliases are bounded to five. Recent message text remains process-memory only and is not part of the persistent identity store. This identity/name feature does not infer personal facts or cross-link members between groups.
 
 ## Error behavior and the generic provider reply
 

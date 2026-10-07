@@ -33,13 +33,19 @@ Project commands use the `yuuk1` command group. The QQ command group and LLM hoo
 - Compose interpolates `.env` variables; `.env` is untracked and ignored.
 - `DEEPSEEK_API_KEY` enters only the AstrBot container environment. In the AstrBot Provider WebUI, configure its API Key field as `$DEEPSEEK_API_KEY`.
 - Provider and model configuration are persisted by AstrBot. Profile model selection is persisted by AstrBot.
-- Star settings come from `_conf_schema.json` and are persisted by AstrBot under `data/astrbot/config/`.
+- Star settings come from _conf_schema.json and are persisted by AstrBot under data/astrbot/config/astrbot_plugin_yuuk1_core_config.json. Group identity private state uses StarTools.get_data_dir("astrbot_plugin_yuuk1_core"), which resolves inside the bind-mounted AstrBot data tree.
 - No API key is part of plugin settings, tracked JSON, Python, or Compose source.
 - NapCat `MODE=astrbot` copies its built-in OneBot template to persistent config on every startup. That template has an empty token and the private `ws://astrbot:6199/ws` URL. An `.env` token could not reliably configure both sides, so no token variable or config patcher is used. Both admin UIs remain loopback-bound and 6199 remains inside the two-service Compose network.
 
+## Group Identity Context v1 — VERIFIED
+
+AstrBot v4.28.2 resolves the sender display name from the group card (`card`) first and the sender nickname (`nickname`) as fallback. A stable per-group member key uses domain-separated HMAC-SHA256 over platform, group, and user identifiers; the raw identifiers are not persisted or included in logs or model context. Current name and up to five aliases are persisted in the bounded JSON identity store.
+
+The `identity_secret` and `group_identity.json` files must be backed up and restored together with `data/astrbot/config/astrbot_plugin_yuuk1_core_config.json`. Dynamic context is rendered as `[display name] message`; only duplicate names receive a short anonymous suffix. ENGAGED reuses the same per-group member key. The user confirmed sender identification, A/B attribution, rename updates, AstrBot restart recovery, persistent storage, and ENGAGED continuity by QQ E2E.
+
 ## Persistence
 
-AstrBot owns conversations and provider/profile state in its data directory. NapCat owns its runtime configuration and QQ session data under `data/napcat`. Yuuk1 Core stores no custom persistent state; the limiter uses process memory and resets on restart. `scripts/backup.ps1` requires the stack to be stopped, archives AstrBot data and NapCat configuration while excluding logs/cache/temp files, and writes to ignored `backups/`. The optional `-IncludeQQSession` also archives NapCat QQ login state; restoring the default backup into an empty deployment requires another QR login.
+AstrBot owns conversations, provider/profile state, and Yuuk1 Core plugin data in its data directory. NapCat owns its runtime configuration and QQ session data under data/napcat. Group Identity Context v1 stores a random 32-byte HMAC secret at data/astrbot/plugin_data/astrbot_plugin_yuuk1_core/identity_secret and an atomically replaced JSON store at data/astrbot/plugin_data/astrbot_plugin_yuuk1_core/group_identity.json. The store contains only group/member HMAC keys, current names, at most five aliases, and first/last seen timestamps; raw QQ/group IDs and message history are not persisted. The user/group rate limiter and recent message context remain in process memory. scripts/backup.ps1 requires the stack to be stopped and archives all AstrBot data (including the two identity files and data/astrbot/config/astrbot_plugin_yuuk1_core_config.json) plus NapCat configuration while excluding logs/cache/temp files. It writes only to ignored backups/; the optional -IncludeQQSession also archives NapCat QQ login state.
 
 ## Upgrade Strategy
 
@@ -52,7 +58,7 @@ See `docs/ASTRBOT_RESEARCH.md` for inspected APIs and `docs/UPSTREAM.md` for rel
 
 ## Optional group participation
 
-When both optional settings are off, the plugin does not retain group-message context and sends no proactive messages. With Free Talk or Idle Presence enabled, a Star handler observes only allowed QQ group messages and stores a bounded, TTL-pruned in-memory summary per unified group session. It stores sanitized text/placeholders and display name or process-local alias, never a raw event or raw message object.
+Group Identity Context is enabled by default and observes allowed QQ group messages only to update a bounded persistent name mapping. Free Talk and Idle Presence remain separate optional switches; when either is enabled, the observer also stores a bounded, TTL-pruned in-memory message summary per unified group session. It stores sanitized text/placeholders and speaker attribution, never a raw event or raw message object.
 
 IDLE ordinary Free Talk applies allowlist/self/command/recent-activity gates, the default 0.35 probability, and one short Provider decision request. There is no Free Talk time cooldown; the project security limiter remains at 8 requests/user/60s and 30 requests/group/60s by default. A direct nickname address at the start of a message and a Reply whose resolved sender is the bot bypass the generic probability and classifier. After a successful bot turn, the group enters an in-memory ENGAGED state for 300 seconds. In that state, explicit continuation/direct cues and replies to the bot go straight to the native Agent path, explicit replies to another person are silent, and ambiguous messages use the existing single decision request to classify relevance. The timeout refreshes only after the entire reply turn sends successfully. SILENT yields no `ProviderRequest`; a selected response yields one `event.request_llm` with the current Conversation into AstrBot's regular AgentRequestSubStage. That native path selects the current Provider, applies the selected Persona and tools (including Web Search), and writes one answer to the current Conversation.
 

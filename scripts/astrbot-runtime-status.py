@@ -17,6 +17,7 @@ DATA = Path("/AstrBot/data")
 PLUGIN = DATA / "plugins/astrbot_plugin_yuuk1_core"
 MARKER = Path("/tmp/yuuk1-core-ready.json")
 ONEBOT_MARKER = Path("/tmp/yuuk1-core-onebot.json")
+IDENTITY_MARKER = Path("/tmp/yuuk1-core-identity.json")
 MODULE = "data.plugins.astrbot_plugin_yuuk1_core.main"
 
 
@@ -50,6 +51,30 @@ def current_connection_marker(
         return 0 <= age_ns <= 5_000_000_000 and current_marker(marker_path, proc_root)
     except (OSError, ValueError, KeyError, TypeError):
         return False
+
+
+def current_identity_marker(
+    marker_path: Path = IDENTITY_MARKER,
+    proc_root: Path = Path("/proc"),
+) -> dict[str, bool | int]:
+    """Return only current-process identity health booleans and a safe count."""
+    try:
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        if not current_marker(marker_path, proc_root):
+            return {}
+        count = marker.get("known_members", 0)
+        if type(count) is not int or not 0 <= count <= 100_000:
+            count = 0
+        return {
+            "identity_enabled": marker.get("identity_enabled") is True,
+            "identity_persistence_enabled": marker.get("persistence_enabled") is True,
+            "identity_loaded": marker.get("loaded") is True,
+            "identity_healthy": marker.get("healthy") is True,
+            "identity_secret_available": marker.get("secret_available") is True,
+            "identity_known_members": count,
+        }
+    except (OSError, ValueError, TypeError, KeyError):
+        return {}
 
 
 def plugin_enabled(db_path: Path = DATA / "data_v4.db") -> bool:
@@ -164,6 +189,12 @@ def main() -> None:
         "listening": False,
         "websocket_socket": False,
         "websocket_registry_connected": False,
+        "identity_enabled": False,
+        "identity_persistence_enabled": False,
+        "identity_loaded": False,
+        "identity_healthy": False,
+        "identity_secret_available": False,
+        "identity_known_members": 0,
     }
     try:
         result["mounted"] = all(
@@ -178,6 +209,7 @@ def main() -> None:
         result["enabled"] = plugin_enabled()
         result["ready_current"] = current_marker()
         result["websocket_registry_connected"] = current_connection_marker()
+        result.update(current_identity_marker())
         config = json.loads((DATA / "cmd_config.json").read_text(encoding="utf-8-sig"))
         result.update(config_state(config))
         try:

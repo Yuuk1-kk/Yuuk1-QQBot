@@ -156,6 +156,7 @@ if ($astrbotRunning) {
         Write-Check 'MANUAL' 'DEEPSEEK_API_KEY' '无法检查 AstrBot 当前进程的密钥环境变量。'
         Write-Check 'WARN' 'Yuuk1 Core mount' '无法读取 AstrBot 容器状态。'
         Write-Check 'WARN' 'Yuuk1 Core plugin load' '无法读取当前插件状态。'
+        Write-Check 'WARN' 'Group Identity secret / store' '无法读取当前插件身份状态。'
         Write-Check 'MANUAL' 'DeepSeek Provider/Profile' '无法读取 AstrBot 静态配置；未发起模型请求。'
         Write-Check 'WARN' 'OneBot Adapter' '无法读取 AstrBot Adapter 状态。'
         Write-Check 'WARN' 'OneBot listener 6199' '无法读取 AstrBot 监听状态。'
@@ -171,6 +172,10 @@ if ($astrbotRunning) {
         Write-Check $(if ($astrbotState.mounted) { 'PASS' } else { 'FAIL' }) 'Yuuk1 Core mount' '容器内 main.py 与 metadata.yaml 可读。'
         $pluginStatus = Get-DoctorPluginState -State $astrbotState
         Write-Check $pluginStatus.Level 'Yuuk1 Core plugin load' $pluginStatus.Detail
+        $identitySecretStatus = Get-DoctorIdentitySecretState -State $astrbotState
+        Write-Check $identitySecretStatus.Level 'Group Identity secret' $identitySecretStatus.Detail
+        $identityStoreStatus = Get-DoctorIdentityStoreState -State $astrbotState
+        Write-Check $identityStoreStatus.Level 'Group Identity store' $identityStoreStatus.Detail
         $deepSeekStatus = Get-DoctorDeepSeekState -State $astrbotState
         Write-Check $deepSeekStatus.Level 'DeepSeek Provider/Profile' $deepSeekStatus.Detail
         Write-Check $(if ($astrbotState.adapter_enabled) { 'PASS' } else { 'WARN' }) 'OneBot Adapter' $(if ($astrbotState.adapter_enabled) { 'AstrBot aiocqhttp Reverse WebSocket 配置已启用。' } else { 'AstrBot aiocqhttp Reverse WebSocket 配置未启用。' })
@@ -180,6 +185,7 @@ if ($astrbotRunning) {
     $astrbotState = $null
     Write-Check 'MANUAL' 'DEEPSEEK_API_KEY' 'AstrBot 未运行，无法检查当前进程的密钥环境变量。'
     Write-Check 'MANUAL' 'DeepSeek Provider/Profile' 'AstrBot 未运行，无法读取静态配置。'
+    Write-Check 'MANUAL' 'Group Identity secret / store' 'AstrBot 未运行，无法检查身份持久化。'
     Write-Check 'WARN' 'AstrBot WebUI / Yuuk1 Core / OneBot' 'AstrBot 未运行，无法检查。'
 }
 

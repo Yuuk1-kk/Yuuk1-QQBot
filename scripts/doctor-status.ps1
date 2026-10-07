@@ -19,6 +19,44 @@ function Get-DoctorPluginState {
     return [pscustomobject]@{ Level = 'PASS'; Detail = '插件入口可读、已启用，当前进程完成 initialize。' }
 }
 
+function Get-DoctorIdentitySecretState {
+    param([Parameter(Mandatory)][hashtable]$State)
+
+    if (-not $State.identity_enabled) {
+        return [pscustomobject]@{ Level = 'MANUAL'; Detail = '群成员身份上下文已关闭。' }
+    }
+    if (-not $State.identity_persistence_enabled) {
+        return [pscustomobject]@{ Level = 'MANUAL'; Detail = '身份持久化已关闭；重启后将使用临时身份。' }
+    }
+    if (-not $State.identity_secret_available) {
+        return [pscustomobject]@{ Level = 'FAIL'; Detail = '匿名身份密钥不可用；为避免身份静默重置，持久化已停用。' }
+    }
+    return [pscustomobject]@{ Level = 'PASS'; Detail = '匿名身份密钥已加载；内容已隐藏。' }
+}
+
+function Get-DoctorIdentityStoreState {
+    param([Parameter(Mandatory)][hashtable]$State)
+
+    if (-not $State.identity_enabled) {
+        return [pscustomobject]@{ Level = 'MANUAL'; Detail = '群成员身份上下文已关闭。' }
+    }
+    if (-not $State.identity_persistence_enabled) {
+        return [pscustomobject]@{ Level = 'MANUAL'; Detail = '身份持久化已关闭；当前仅保留进程内上下文。' }
+    }
+    if (-not $State.identity_loaded) {
+        return [pscustomobject]@{ Level = 'WARN'; Detail = '当前 AstrBot 进程尚未加载身份库。' }
+    }
+    if (-not $State.identity_healthy) {
+        return [pscustomobject]@{ Level = 'FAIL'; Detail = '身份库不可用；数据未自动覆盖。' }
+    }
+    $count = 0
+    $parsedCount = 0
+    if ([int]::TryParse([string]$State.identity_known_members, [ref]$parsedCount) -and $parsedCount -ge 0 -and $parsedCount -le 100000) {
+        $count = $parsedCount
+    }
+    return [pscustomobject]@{ Level = 'PASS'; Detail = "身份库已加载；known_members=$count；不显示成员姓名或标识。" }
+}
+
 function Get-DoctorOneBotState {
     param([Parameter(Mandatory)][hashtable]$State)
 
