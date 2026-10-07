@@ -2,8 +2,8 @@
   "bot_name": {
     "description": "Bot 名称",
     "type": "string",
-    "default": "Yuuk1",
-    "hint": "用于项目人格说明中的 Bot 名称。"
+    "default": "鲸鲸",
+    "hint": "仅为历史兼容的简短身份补充；完整人格仍由 AstrBot Persona 管理。"
   },
   "allowed_groups": {
     "description": "允许响应的群号",
@@ -43,8 +43,8 @@
   "user_rate_limit_requests": {
     "description": "每个用户在窗口内的请求数",
     "type": "int",
-    "default": 3,
-    "hint": "有效范围 1 至 10000 次；超出时静默丢弃，不占用群额度。"
+    "default": 8,
+    "hint": "同一用户每 60 秒最多 8 次模型请求；保护服务免受刷屏和异常循环影响，并允许正常连续对话。超出时静默丢弃。"
   },
   "rate_limit_window": {
     "description": "群级限流时间窗口（秒）",
@@ -55,7 +55,133 @@
   "rate_limit_requests": {
     "description": "每个群在窗口内的请求数",
     "type": "int",
-    "default": 15,
-    "hint": "按群聊中的模型请求计数；有效范围 1 至 10000 次。"
+    "default": 30,
+    "hint": "默认每 60 秒最多 30 次模型请求；按整个群计数。"
+  },
+  "free_talk_enabled": {
+    "description": "Free Talk：启用群聊主动参与",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭。开启后仅监听 allowed_groups 中的 QQ 群；普通 @鲸鲸仍走 AstrBot 原生回复流程。"
+  },
+  "engagement_enabled": {
+    "description": "启用群聊连续对话状态",
+    "type": "bool",
+    "default": true,
+    "hint": "鲸鲸参与群聊后，在一段时间内将后续相关消息视为连续对话，不再重新经过普通主动插话概率。"
+  },
+  "engagement_timeout_seconds": {
+    "description": "连续对话状态保留时间（秒）",
+    "type": "int",
+    "default": 300,
+    "hint": "自鲸鲸最近一次成功参与群聊起计时；默认 300 秒。期间鲸鲸再次成功回复会重新计时。此设置不是发言冷却，不会阻止连续回复。有效范围 1 至 86400 秒。"
+  },
+  "free_talk_min_interval_seconds": {
+    "description": "Free Talk：旧版群发言间隔（已弃用）",
+    "type": "int",
+    "default": 0,
+    "hint": "仅为兼容旧配置保留；当前 Free Talk 不使用时间冷却。"
+  },
+  "free_talk_decision_interval_seconds": {
+    "description": "Free Talk：旧版判断间隔（已弃用）",
+    "type": "int",
+    "default": 0,
+    "hint": "仅为兼容旧配置保留；当前 Free Talk 不使用时间间隔限制。安全请求限流仍然生效。"
+  },
+  "free_talk_probability": {
+    "description": "Free Talk：普通消息候选概率",
+    "type": "float",
+    "default": 0.35,
+    "hint": "范围 0 至 1。仅在鲸鲸当前未参与连续对话时，用于决定是否主动加入普通群聊；命中后仍由模型决定 SPEAK 或 SILENT。"
+  },
+  "free_talk_nickname_probability": {
+    "description": "Free Talk：旧版昵称候选概率（已弃用）",
+    "type": "float",
+    "default": 1.0,
+    "hint": "仅为兼容旧配置保留；明确直接呼叫不经过随机概率或 SPEAK/SILENT 分类。"
+  },
+  "free_talk_context_messages": {
+    "description": "Free Talk：每群近期消息上限",
+    "type": "int",
+    "default": 20,
+    "hint": "只保存在插件内存；有效范围 1 至 100 条。"
+  },
+  "free_talk_context_ttl_seconds": {
+    "description": "Free Talk：近期上下文保留时长（秒）",
+    "type": "int",
+    "default": 900,
+    "hint": "过期消息自动从内存上下文移除；有效范围 1 至 86400 秒。"
+  },
+  "free_talk_min_recent_messages": {
+    "description": "Free Talk：普通话题最少近期消息数",
+    "type": "int",
+    "default": 2,
+    "hint": "明确直接呼叫可绕过此本地门槛；普通话题仍需达到近期消息数并通过语义判断。有效范围 1 至 100 条。"
+  },
+  "multi_message_enabled": {
+    "description": "多消息回复：启用自然拆分",
+    "type": "bool",
+    "default": true,
+    "hint": "一次生成完成后，按自然段或明显独立短句发送最多指定条数；不会增加模型调用。"
+  },
+  "multi_message_max_parts": {
+    "description": "多消息回复：最多消息条数",
+    "type": "int",
+    "default": 3,
+    "hint": "有效范围 1 至 3；超出的文本会合并进最后一条。"
+  },
+  "multi_message_min_chars_to_split": {
+    "description": "多消息回复：拆分最短字符数",
+    "type": "int",
+    "default": 20,
+    "hint": "回复短于此长度时保持单条，避免拆开简短回答。"
+  },
+  "stickers_enabled": {
+    "description": "Sticker：启用鲸鲸本地表情包",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭。只从插件 assets/stickers 受控目录读取 PNG/JPG/JPEG 文件。"
+  },
+  "idle_speak_enabled": {
+    "description": "Idle Presence：启用安静时主动冒泡",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭。仅对插件运行期间实际收到过允许群消息的会话生效。"
+  },
+  "idle_threshold_seconds": {
+    "description": "Idle Presence：群聊安静阈值（秒）",
+    "type": "int",
+    "default": 1800,
+    "hint": "群里达到此时长无新消息后才具备冒泡资格；有效范围 1 至 604800 秒。"
+  },
+  "idle_check_interval_seconds": {
+    "description": "Idle Presence：检查间隔（秒）",
+    "type": "int",
+    "default": 300,
+    "hint": "后台任务在此间隔检查一次；有效范围 1 至 86400 秒。"
+  },
+  "idle_probability": {
+    "description": "Idle Presence：每次符合条件后的触发概率",
+    "type": "float",
+    "default": 0.1,
+    "hint": "范围 0 至 1。触发后最多生成一条简短文字，不调用工具或搜索。"
+  },
+  "idle_min_interval_seconds": {
+    "description": "Idle Presence：同群尝试最短间隔（秒）",
+    "type": "int",
+    "default": 21600,
+    "hint": "成功或失败的模型尝试后都执行此冷却；有效范围 1 至 604800 秒。"
+  },
+  "idle_active_start_hour": {
+    "description": "Idle Presence：允许主动发言起始小时",
+    "type": "int",
+    "default": 9,
+    "hint": "按 AstrBot 容器本地时区，取值 0 至 23；起始时刻包含在内。"
+  },
+  "idle_active_end_hour": {
+    "description": "Idle Presence：允许主动发言结束小时",
+    "type": "int",
+    "default": 23,
+    "hint": "按 AstrBot 容器本地时区，取值 0 至 23；结束时刻不包含在内。起始和结束相同表示全天禁用。"
   }
 }

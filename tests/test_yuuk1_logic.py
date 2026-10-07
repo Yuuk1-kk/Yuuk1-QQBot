@@ -47,14 +47,83 @@ class AccessPolicyTests(unittest.TestCase):
 class ConfigNormalizationTests(unittest.TestCase):
     def test_defaults_are_safe_and_usable(self) -> None:
         settings = normalize_config({})
-        self.assertEqual(settings.bot_name, "Yuuk1")
+        self.assertEqual(settings.bot_name, "鲸鲸")
         self.assertEqual(settings.allowed_groups, frozenset())
         self.assertFalse(settings.allow_private_chat)
         self.assertTrue(settings.rate_limit_enabled)
         self.assertEqual(settings.rate_limit_window, 60)
-        self.assertEqual(settings.rate_limit_requests, 15)
+        self.assertEqual(settings.rate_limit_requests, 30)
         self.assertEqual(settings.user_rate_limit_window, 60)
-        self.assertEqual(settings.user_rate_limit_requests, 3)
+        self.assertEqual(settings.user_rate_limit_requests, 8)
+        self.assertFalse(settings.free_talk_enabled)
+        self.assertTrue(settings.engagement_enabled)
+        self.assertEqual(settings.engagement_timeout_seconds, 300)
+        self.assertEqual(settings.free_talk_min_interval_seconds, 0)
+        self.assertEqual(settings.free_talk_decision_interval_seconds, 0)
+        self.assertEqual(settings.free_talk_probability, 0.35)
+        self.assertEqual(settings.free_talk_nickname_probability, 1.0)
+        self.assertEqual(settings.free_talk_context_messages, 20)
+        self.assertEqual(settings.free_talk_context_ttl_seconds, 900)
+        self.assertEqual(settings.free_talk_min_recent_messages, 2)
+        self.assertTrue(settings.multi_message_enabled)
+        self.assertEqual(settings.multi_message_max_parts, 3)
+        self.assertEqual(settings.multi_message_min_chars_to_split, 20)
+        self.assertFalse(settings.stickers_enabled)
+        self.assertFalse(settings.idle_speak_enabled)
+        self.assertEqual(settings.idle_threshold_seconds, 1800)
+        self.assertEqual(settings.idle_check_interval_seconds, 300)
+        self.assertEqual(settings.idle_probability, 0.1)
+        self.assertEqual(settings.idle_min_interval_seconds, 21600)
+        self.assertEqual(settings.idle_active_start_hour, 9)
+        self.assertEqual(settings.idle_active_end_hour, 23)
+
+    def test_new_feature_values_are_bounded_and_malformed_values_fall_back(self) -> None:
+        settings = normalize_config(
+            {
+                "free_talk_enabled": "true",
+                "engagement_enabled": "false",
+                "engagement_timeout_seconds": 999_999,
+                "free_talk_min_interval_seconds": 999_999,
+                "free_talk_decision_interval_seconds": 0,
+                "free_talk_probability": 4,
+                "free_talk_nickname_probability": "nan",
+                "multi_message_enabled": "false",
+                "multi_message_max_parts": 4,
+                "multi_message_min_chars_to_split": -1,
+                "free_talk_context_messages": 0,
+                "free_talk_context_ttl_seconds": -1,
+                "free_talk_min_recent_messages": 1000,
+                "stickers_enabled": "yes",
+                "idle_speak_enabled": True,
+                "idle_threshold_seconds": 999_999,
+                "idle_check_interval_seconds": "bad",
+                "idle_probability": -1,
+                "idle_min_interval_seconds": 0,
+                "idle_active_start_hour": 24,
+                "idle_active_end_hour": -2,
+            }
+        )
+        self.assertTrue(settings.free_talk_enabled)
+        self.assertFalse(settings.engagement_enabled)
+        self.assertEqual(settings.engagement_timeout_seconds, 86_400)
+        self.assertEqual(settings.free_talk_min_interval_seconds, 86_400)
+        self.assertEqual(settings.free_talk_decision_interval_seconds, 0)
+        self.assertEqual(settings.free_talk_probability, 1.0)
+        self.assertEqual(settings.free_talk_nickname_probability, 1.0)
+        self.assertEqual(settings.free_talk_context_messages, 1)
+        self.assertEqual(settings.free_talk_context_ttl_seconds, 1)
+        self.assertEqual(settings.free_talk_min_recent_messages, 100)
+        self.assertFalse(settings.multi_message_enabled)
+        self.assertEqual(settings.multi_message_max_parts, 3)
+        self.assertEqual(settings.multi_message_min_chars_to_split, 1)
+        self.assertTrue(settings.stickers_enabled)
+        self.assertTrue(settings.idle_speak_enabled)
+        self.assertEqual(settings.idle_threshold_seconds, 604_800)
+        self.assertEqual(settings.idle_check_interval_seconds, 300)
+        self.assertEqual(settings.idle_probability, 0.0)
+        self.assertEqual(settings.idle_min_interval_seconds, 1)
+        self.assertEqual(settings.idle_active_start_hour, 23)
+        self.assertEqual(settings.idle_active_end_hour, 0)
 
     def test_malformed_values_fall_back_and_limits_are_bounded(self) -> None:
         settings = normalize_config(
@@ -71,7 +140,7 @@ class ConfigNormalizationTests(unittest.TestCase):
                 "user_rate_limit_requests": 99_999,
             }
         )
-        self.assertEqual(settings.bot_name, "Yuuk1")
+        self.assertEqual(settings.bot_name, "鲸鲸")
         self.assertEqual(settings.allowed_groups, frozenset({"12345", "67890"}))
         self.assertFalse(settings.allow_private_chat)
         self.assertEqual(settings.admin_users, frozenset({"12345"}))
@@ -141,6 +210,19 @@ class TwoLevelRateLimiterTests(unittest.TestCase):
         self.assertEqual(limiter.allow("user-c", "group-a", now=10), (False, 10.0))
         self.assertEqual(limiter.allow("user-a", "group-b", now=10), (True, 0.0))
         self.assertEqual(limiter.allow("user-c", "group-a", now=20), (True, 0.0))
+
+    def test_default_security_limits_allow_five_normal_engaged_turns(self) -> None:
+        settings = normalize_config({})
+        limiter = TwoLevelRateLimiter(
+            settings.user_rate_limit_window,
+            settings.user_rate_limit_requests,
+            settings.rate_limit_window,
+            settings.rate_limit_requests,
+        )
+        self.assertEqual(settings.user_rate_limit_requests, 8)
+        self.assertEqual(settings.rate_limit_requests, 30)
+        for index in range(5):
+            self.assertTrue(limiter.allow("user-a", "group-a", now=10 + index)[0])
 
     def test_missing_sender_fails_closed_without_charging_group(self) -> None:
         limiter = TwoLevelRateLimiter(60, 1, 60, 1)

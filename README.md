@@ -62,7 +62,7 @@ notepad .env
 - 群白名单、私聊开关、管理员、人格、限流：AstrBot WebUI → 插件 → Yuuk1 Core 配置
 - NapCat 登录与 transport 配置：NapCat WebUI；Reverse WebSocket 地址由官方 `MODE=astrbot` 模板设为 `ws://astrbot:6199/ws`
 
-`allowed_groups` 为空时所有群默认静默；`allow_private_chat=false` 时 QQ 私聊默认禁用。群聊/私聊允许后，同一 QQ 用户默认每 60 秒最多 3 次模型请求，每个群默认每 60 秒最多 15 次；两级限流只在进程内保存。`/yuuk1 reset` 与 `/yuuk1 status` 仅对 `admin_users` 生效。
+`allowed_groups` 为空时所有群默认静默；`allow_private_chat=false` 时 QQ 私聊默认禁用。群聊/私聊允许后，同一 QQ 用户默认每 60 秒最多 8 次模型请求，每个群默认每 60 秒最多 30 次；两级限流只在进程内保存。该限流保护服务免受刷屏和异常循环影响，正常 3–5 轮连续对话不会触顶。`/yuuk1 reset` 与 `/yuuk1 status` 仅对 `admin_users` 生效。
 
 ## 管理脚本
 
@@ -104,3 +104,15 @@ python -m ruff check plugins scripts tests
 - [AstrBot](https://github.com/AstrBotDevs/AstrBot) · [官方文档](https://docs.astrbot.app/)
 - [NapCatQQ](https://github.com/NapNeko/NapCatQQ) · [NapCat-Docker](https://github.com/NapNeko/NapCat-Docker)
 - [DeepSeek API 文档](https://api-docs.deepseek.com/)
+
+## 可选群聊功能与回复格式
+
+- **Free Talk v1 — VERIFIED**：打开 `free_talk_enabled` 后，Yuuk1 Core 才会为 `allowed_groups` 里的群保留最近 20 条 / 15 分钟的内存摘要。IDLE 普通消息经过本地近期消息门后，以默认 `free_talk_probability=0.35` 决定是否进入一次 SPEAK/SILENT 判断。直接呼叫“鲸鲸 / 大肥鱼 / 蓝色大肥鱼 / 小鲸 / 鲸鱼娘”、@鲸鲸 和 Reply 鲸鲸时走明确回复路径，不经过 0.35 普通候选概率。普通句子中的昵称提及仍按 IDLE 普通消息处理。
+- **连续对话**：`engagement_enabled=true` 默认开启，按群保留最近一次成功回复的用户标记、鲸鲸最后一轮回复和最近群聊上下文；状态只在内存保存。每次成功回复后 300 秒内，相关消息不再经过 0.35：高置信延续直接进入原生回复，高置信无关引用静默，模糊内容只用现有的一次分类请求判断相关性。每次成功完成的整轮回复刷新 300 秒状态。300 秒是 ENGAGED 状态时长，不是聊天冷却；Free Talk 没有时间冷却。QQ v4.28.2 `Reply.sender_id` 可识别引用对象，未解析的引用不会猜测目标。旧 `free_talk_min_interval_seconds` 和 `free_talk_decision_interval_seconds` 保留兼容、不参与决策。安全限流仍按每用户 8 次 / 60 秒、每群 30 次 / 60 秒生效；自消息防回环、命令及未允许群排除继续生效。SPEAK 后只进入一次 AstrBot 原生 Conversation、Persona、Agent、Tools 和 Web Search 流程。
+- **多消息回复**：`multi_message_enabled=true` 默认开启，`multi_message_max_parts=3`，`multi_message_min_chars_to_split=20`。只在最终生成后按段落或完整短句轻量拆分，不增加 LLM 调用；短文本、URL 和 Markdown 结构保持单条。后续余下文本会以约 0.45 秒间隔发送；启用文字加贴图时，顺序为首条文本、剩余文本、贴图。
+- **Sticker**：打开 `stickers_enabled` 后，模型可使用 `jingjing_sticker` 工具从 `plugins/astrbot_plugin_yuuk1_core/assets/stickers/` 选择本地 PNG/JPG/JPEG。每图最多 8 MiB；GIF/WebP/远程图不支持。目录只在 AstrBot 加载时扫描，增删图片后只重启 AstrBot。没有资源时自动保留文字回复。
+- **Idle Presence**：打开 `idle_speak_enabled` 后才启动一个可取消的后台任务。默认群聊安静 30 分钟、检查间隔 5 分钟、单群尝试间隔 6 小时、主动时段 09:00–23:00、本次检查触发概率 0.10。只向插件运行期间观察到的允许群发送。
+- Free Talk、Sticker 和 Idle Presence 开关默认关闭；只有开启 Free Talk 或 Idle Presence 才收集允许群聊的有界内存上下文。多消息回复默认开启，但只在已有的允许 QQ 群 LLM 回复完成后拆分，不额外观察或保存消息上下文。动态上下文只存在进程内，不写入 Persona 或 Conversation。
+- 当前 AstrBot v4.28.2 “鲸鲸” Persona 的 `tools` 实际值为 `None`，按上游语义会允许所有工具，包括 Web Search 和 `jingjing_sticker`。若之后把 Persona 改成显式工具列表，需要在列表中加入 `jingjing_sticker` 才能发送表情；不要为此覆盖 Persona。
+
+每次最终生成最多拆成 3 条 QQ 消息；短文本、URL 和 Markdown 结构保持完整，不增加 LLM 调用。Free Talk v1 的 direct nickname、ENGAGED 连续对话、无关群聊静默、中断后承接、@ / Reply、多消息发送以及 Runtime / doctor 已由用户真实验证。贴图图片 E2E 尚未完成，需用户提供 1–3 张鲸鲸图片；Sticker v1 是下一阶段。

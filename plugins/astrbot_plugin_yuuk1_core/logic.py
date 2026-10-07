@@ -7,6 +7,7 @@ import time
 from collections import deque
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from math import isfinite
 
 _ID_SPLIT_RE = re.compile(r"[,;\s]+")
 
@@ -71,6 +72,16 @@ def _positive_int(value: object, default: int, maximum: int) -> int:
     return min(max(parsed, 1), maximum)
 
 
+def _nonnegative_int(value: object, default: int, maximum: int) -> int:
+    if isinstance(value, bool):
+        return default
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return min(max(parsed, 0), maximum)
+
+
 def _bool_value(value: object, default: bool) -> bool:
     if isinstance(value, bool):
         return value
@@ -85,6 +96,28 @@ def _bool_value(value: object, default: bool) -> bool:
     return default
 
 
+def _probability(value: object, default: float) -> float:
+    if isinstance(value, bool):
+        return default
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    if not isfinite(parsed):
+        return default
+    return min(max(parsed, 0.0), 1.0)
+
+
+def _hour(value: object, default: int) -> int:
+    if isinstance(value, bool):
+        return default
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return min(max(parsed, 0), 23)
+
+
 @dataclass(frozen=True, slots=True)
 class CoreSettings:
     bot_name: str
@@ -97,30 +130,104 @@ class CoreSettings:
     rate_limit_requests: int
     user_rate_limit_window: int
     user_rate_limit_requests: int
+    free_talk_enabled: bool
+    engagement_enabled: bool
+    engagement_timeout_seconds: int
+    free_talk_min_interval_seconds: int
+    free_talk_decision_interval_seconds: int
+    free_talk_probability: float
+    free_talk_nickname_probability: float
+    free_talk_context_messages: int
+    free_talk_context_ttl_seconds: int
+    free_talk_min_recent_messages: int
+    multi_message_enabled: bool
+    multi_message_max_parts: int
+    multi_message_min_chars_to_split: int
+    stickers_enabled: bool
+    idle_speak_enabled: bool
+    idle_threshold_seconds: int
+    idle_check_interval_seconds: int
+    idle_probability: float
+    idle_min_interval_seconds: int
+    idle_active_start_hour: int
+    idle_active_end_hour: int
 
 
 def normalize_config(config: Mapping[str, object] | None) -> CoreSettings:
     """Return bounded settings even when stored WebUI values are malformed."""
     values: Mapping[str, object] = config if isinstance(config, Mapping) else {}
-    bot_name_value = values.get("bot_name", "Yuuk1")
+    bot_name_value = values.get("bot_name", "鲸鲸")
     prompt_value = values.get("system_prompt", "")
-    bot_name = bot_name_value.strip() if isinstance(bot_name_value, str) else "Yuuk1"
+    bot_name = bot_name_value.strip() if isinstance(bot_name_value, str) else "鲸鲸"
     system_prompt = prompt_value.strip() if isinstance(prompt_value, str) else ""
     return CoreSettings(
-        bot_name=bot_name or "Yuuk1",
+        bot_name=bot_name or "鲸鲸",
         allowed_groups=normalize_ids(values.get("allowed_groups", [])),
         allow_private_chat=_bool_value(values.get("allow_private_chat", False), False),
         admin_users=normalize_ids(values.get("admin_users", [])),
         system_prompt=system_prompt,
         rate_limit_enabled=_bool_value(values.get("rate_limit_enabled", True), True),
         rate_limit_window=_positive_int(values.get("rate_limit_window", 60), 60, 86_400),
-        rate_limit_requests=_positive_int(values.get("rate_limit_requests", 15), 15, 10_000),
+        rate_limit_requests=_positive_int(values.get("rate_limit_requests", 30), 30, 10_000),
         user_rate_limit_window=_positive_int(
             values.get("user_rate_limit_window", 60), 60, 86_400
         ),
         user_rate_limit_requests=_positive_int(
-            values.get("user_rate_limit_requests", 3), 3, 10_000
+            values.get("user_rate_limit_requests", 8), 8, 10_000
         ),
+        free_talk_enabled=_bool_value(values.get("free_talk_enabled", False), False),
+        engagement_enabled=_bool_value(
+            values.get("engagement_enabled", True), True
+        ),
+        engagement_timeout_seconds=_positive_int(
+            values.get("engagement_timeout_seconds", 300), 300, 86_400
+        ),
+        # Legacy fields remain readable for existing WebUI configs, but the
+        # Free Talk decision path deliberately does not consume either value.
+        free_talk_min_interval_seconds=_nonnegative_int(
+            values.get("free_talk_min_interval_seconds", 0), 0, 86_400
+        ),
+        free_talk_decision_interval_seconds=_nonnegative_int(
+            values.get("free_talk_decision_interval_seconds", 0), 0, 3_600
+        ),
+        free_talk_probability=_probability(
+            values.get("free_talk_probability", 0.35), 0.35
+        ),
+        free_talk_nickname_probability=_probability(
+            values.get("free_talk_nickname_probability", 1.0), 1.0
+        ),
+        free_talk_context_messages=_positive_int(
+            values.get("free_talk_context_messages", 20), 20, 100
+        ),
+        free_talk_context_ttl_seconds=_positive_int(
+            values.get("free_talk_context_ttl_seconds", 900), 900, 86_400
+        ),
+        free_talk_min_recent_messages=_positive_int(
+            values.get("free_talk_min_recent_messages", 2), 2, 100
+        ),
+        multi_message_enabled=_bool_value(
+            values.get("multi_message_enabled", True), True
+        ),
+        multi_message_max_parts=_positive_int(
+            values.get("multi_message_max_parts", 3), 3, 3
+        ),
+        multi_message_min_chars_to_split=_positive_int(
+            values.get("multi_message_min_chars_to_split", 20), 20, 1000
+        ),
+        stickers_enabled=_bool_value(values.get("stickers_enabled", False), False),
+        idle_speak_enabled=_bool_value(values.get("idle_speak_enabled", False), False),
+        idle_threshold_seconds=_positive_int(
+            values.get("idle_threshold_seconds", 1800), 1800, 604_800
+        ),
+        idle_check_interval_seconds=_positive_int(
+            values.get("idle_check_interval_seconds", 300), 300, 86_400
+        ),
+        idle_probability=_probability(values.get("idle_probability", 0.1), 0.1),
+        idle_min_interval_seconds=_positive_int(
+            values.get("idle_min_interval_seconds", 21_600), 21_600, 604_800
+        ),
+        idle_active_start_hour=_hour(values.get("idle_active_start_hour", 9), 9),
+        idle_active_end_hour=_hour(values.get("idle_active_end_hour", 23), 23),
     )
 
 
