@@ -13,6 +13,20 @@ The OneBot v11 adapter in AstrBot v4.28.2 serializes Image components as an
 image segment. Jingjing Stickers v1 is VERIFIED by user-confirmed QQ E2E for
 image, text + sticker, image-only, and multi-message + sticker delivery.
 
+The optional `sticker_send_mode` setting defaults to `image`. Setting it to
+`qq_custom` attempts an OneBot image segment with `sub_type=1`, which the pinned
+NapCat v4.18.33 implementation forwards as its custom-image subtype. A
+pre-send preparation failure or a confirmed no-platform result can fall back
+to an ordinary image. All `ActionFailed` responses, including NTEvent
+acknowledgement timeouts, and other send exceptions are ambiguous and are not
+retried. Latest user manual QQ E2E passed ordinary text, text + custom emoji,
+pure custom emoji, nickname wake, and ordinary image-mode compatibility; the
+client confirmed the emoji can be favorited. The real timeout case has not
+been re-triggered after the local conservative fix. Historical `(图)` /
+`(表情已发出)` text, tool-call empty completions, Sticker delivery after an
+Agent error, and the AstrBot Stage empty-chain integration coverage gap remain
+known limitations.
+
 Categories and intended tone:
 
 - `happy`: cheerful, light, praised, positive

@@ -69,6 +69,8 @@ class ConfigNormalizationTests(unittest.TestCase):
         self.assertEqual(settings.multi_message_max_parts, 3)
         self.assertEqual(settings.multi_message_min_chars_to_split, 20)
         self.assertFalse(settings.stickers_enabled)
+        self.assertEqual(settings.sticker_send_mode, "image")
+        self.assertFalse(settings.sticker_diagnostics_enabled)
         self.assertEqual(settings.sticker_repeat_window, 4)
         self.assertFalse(settings.idle_speak_enabled)
         self.assertEqual(settings.idle_threshold_seconds, 1800)
@@ -95,6 +97,8 @@ class ConfigNormalizationTests(unittest.TestCase):
                 "free_talk_context_ttl_seconds": -1,
                 "free_talk_min_recent_messages": 1000,
                 "stickers_enabled": "yes",
+                "sticker_send_mode": "qq_custom",
+                "sticker_diagnostics_enabled": "true",
                 "sticker_repeat_window": 100,
                 "idle_speak_enabled": True,
                 "idle_threshold_seconds": 999_999,
@@ -119,6 +123,8 @@ class ConfigNormalizationTests(unittest.TestCase):
         self.assertEqual(settings.multi_message_max_parts, 3)
         self.assertEqual(settings.multi_message_min_chars_to_split, 1)
         self.assertTrue(settings.stickers_enabled)
+        self.assertEqual(settings.sticker_send_mode, "qq_custom")
+        self.assertTrue(settings.sticker_diagnostics_enabled)
         self.assertEqual(settings.sticker_repeat_window, 5)
         self.assertTrue(settings.idle_speak_enabled)
         self.assertEqual(settings.idle_threshold_seconds, 604_800)
@@ -153,6 +159,16 @@ class ConfigNormalizationTests(unittest.TestCase):
         self.assertEqual(settings.rate_limit_requests, 10_000)
         self.assertEqual(settings.user_rate_limit_window, 1)
         self.assertEqual(settings.user_rate_limit_requests, 10_000)
+
+    def test_unsupported_or_non_string_sticker_send_mode_falls_back(self) -> None:
+        self.assertEqual(
+            normalize_config({"sticker_send_mode": "other"}).sticker_send_mode,
+            "image",
+        )
+        self.assertEqual(
+            normalize_config({"sticker_send_mode": ["qq_custom"]}).sticker_send_mode,
+            "image",
+        )
 
     def test_private_chat_can_be_enabled_explicitly(self) -> None:
         self.assertTrue(normalize_config({"allow_private_chat": True}).allow_private_chat)

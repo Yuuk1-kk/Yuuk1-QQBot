@@ -148,6 +148,8 @@ class CoreSettings:
     multi_message_max_parts: int
     multi_message_min_chars_to_split: int
     stickers_enabled: bool
+    sticker_send_mode: str
+    sticker_diagnostics_enabled: bool
     sticker_repeat_window: int
     idle_speak_enabled: bool
     idle_threshold_seconds: int
@@ -165,6 +167,13 @@ def normalize_config(config: Mapping[str, object] | None) -> CoreSettings:
     prompt_value = values.get("system_prompt", "")
     bot_name = bot_name_value.strip() if isinstance(bot_name_value, str) else "鲸鲸"
     system_prompt = prompt_value.strip() if isinstance(prompt_value, str) else ""
+    sticker_send_mode_value = values.get("sticker_send_mode", "image")
+    sticker_send_mode = (
+        sticker_send_mode_value
+        if isinstance(sticker_send_mode_value, str)
+        and sticker_send_mode_value in {"image", "qq_custom"}
+        else "image"
+    )
     return CoreSettings(
         bot_name=bot_name or "鲸鲸",
         allowed_groups=normalize_ids(values.get("allowed_groups", [])),
@@ -232,6 +241,10 @@ def normalize_config(config: Mapping[str, object] | None) -> CoreSettings:
             values.get("multi_message_min_chars_to_split", 20), 20, 1000
         ),
         stickers_enabled=_bool_value(values.get("stickers_enabled", False), False),
+        sticker_send_mode=sticker_send_mode,
+        sticker_diagnostics_enabled=_bool_value(
+            values.get("sticker_diagnostics_enabled", False), False
+        ),
         sticker_repeat_window=_positive_int(
             values.get("sticker_repeat_window", 4), 4, 5
         ),

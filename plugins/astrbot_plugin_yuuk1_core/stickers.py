@@ -26,6 +26,9 @@ STICKER_MAX_BYTES = 8 * 1024 * 1024
 STICKER_MAX_PIXELS = 16_000_000
 TEXT_AND_STICKER = "text_and_sticker"
 STICKER_ONLY = "sticker_only"
+STICKER_SEND_MODE_IMAGE = "image"
+STICKER_SEND_MODE_QQ_CUSTOM = "qq_custom"
+QQ_CUSTOM_IMAGE_SUB_TYPE = 1
 STICKER_CATEGORY_DESCRIPTIONS = {
     "happy": "开心、轻快、被夸或积极回应",
     "angry": "轻微生气、嘴硬或被叫大肥鱼后的抗议",

@@ -17,6 +17,7 @@ import sys
 import time
 import types
 import unittest
+from enum import Enum
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -44,6 +45,51 @@ class _Image:
     @staticmethod
     def fromFileSystem(path: str):
         return SimpleNamespace(path=path)
+
+
+class _ComponentType(str, Enum):
+    Image = "image"
+
+
+class _BaseMessageComponent:
+    """Mirror the pinned generic component field serialization contract."""
+
+    def __init__(self, **values):
+        fields = {
+            name: getattr(self.__class__, name)
+            for name in getattr(self.__class__, "__annotations__", {})
+            if hasattr(self.__class__, name)
+        }
+        fields.update(values)
+        self.__dict__.update(fields)
+
+    def toDict(self):
+        return {
+            "type": self.type,
+            "data": {
+                name: value
+                for name, value in self.__dict__.items()
+                if name != "type" and value is not None
+            },
+        }
+
+
+class _ActionFailed(Exception):
+    """Mirror aiocqhttp's result-bearing ActionFailed wrapper for tests."""
+
+    def __init__(self, result):
+        self.result = result
+
+    @property
+    def retcode(self):
+        return self.result["retcode"]
+
+    def __repr__(self):
+        return "<ActionFailed " + ", ".join(
+            f"{key}={value!r}" for key, value in self.result.items()
+        ) + ">"
+
+    __str__ = __repr__
 
 
 class _Plain:
@@ -136,6 +182,10 @@ class AstrBotPluginRegistrationTests(unittest.TestCase):
         provider = types.ModuleType("astrbot.api.provider")
         star = types.ModuleType("astrbot.api.star")
         message_components = types.ModuleType("astrbot.api.message_components")
+        aiocqhttp = types.ModuleType("aiocqhttp")
+        aiocqhttp.__path__ = []
+        aiocqhttp_exceptions = types.ModuleType("aiocqhttp.exceptions")
+        aiocqhttp_exceptions.ActionFailed = _ActionFailed
         core = types.ModuleType("astrbot.core")
         core.__path__ = []
         core_agent = types.ModuleType("astrbot.core.agent")
@@ -186,6 +236,9 @@ class AstrBotPluginRegistrationTests(unittest.TestCase):
             llm_tool=_register_llm_tool,
             on_waiting_llm_request=_register_hook,
             on_llm_request=_register_hook,
+            on_llm_response=_register_hook,
+            on_using_llm_tool=_register_hook,
+            on_llm_tool_respond=_register_hook,
             on_plugin_error=_register_hook,
             on_decorating_result=_register_hook,
             after_message_sent=_register_hook,
@@ -198,6 +251,8 @@ class AstrBotPluginRegistrationTests(unittest.TestCase):
         )
         message_components.Image = _Image
         message_components.Plain = _Plain
+        message_components.BaseMessageComponent = _BaseMessageComponent
+        message_components.ComponentType = _ComponentType
         core_agent_message.TextPart = _TextPart
 
         modules = {
@@ -207,6 +262,8 @@ class AstrBotPluginRegistrationTests(unittest.TestCase):
             "astrbot.api.provider": provider,
             "astrbot.api.star": star,
             "astrbot.api.message_components": message_components,
+            "aiocqhttp": aiocqhttp,
+            "aiocqhttp.exceptions": aiocqhttp_exceptions,
             "astrbot.core": core,
             "astrbot.core.agent": core_agent,
             "astrbot.core.agent.message": core_agent_message,
@@ -332,6 +389,8 @@ class AstrBotPluginRegistrationTests(unittest.TestCase):
                 self.provider_id = "synthetic-provider"
                 self.llm_error = None
                 self.sent_messages = []
+                self.send_attempts = []
+                self.send_outcomes = []
                 self.last_prompt = ""
                 self.last_system_prompt = ""
                 self.conversation_manager = SimpleNamespace(
@@ -358,6 +417,13 @@ class AstrBotPluginRegistrationTests(unittest.TestCase):
                 return None
 
             async def send_message(self, _session, chain):
+                self.send_attempts.append(list(chain))
+                if self.send_outcomes:
+                    outcome = self.send_outcomes.pop(0)
+                    if isinstance(outcome, BaseException):
+                        raise outcome
+                    if outcome is False:
+                        return False
                 if self.send_error:
                     raise RuntimeError("synthetic transport failure")
                 self.sent_messages.append(list(chain))
@@ -1084,6 +1150,815 @@ class AstrBotPluginRegistrationTests(unittest.TestCase):
                 await instance.after_message_sent(image_only_event)
                 assert len(context.sent_messages) == 1
                 assert len(bot_reply_records) == 1
+
+                custom_instance = plugin.Yuuk1CorePlugin(
+                    context,
+                    {
+                        "allowed_groups": ["12345"],
+                        "free_talk_enabled": True,
+                        "stickers_enabled": True,
+                        "sticker_send_mode": "qq_custom",
+                    },
+                )
+                custom_instance.sticker_root = sticker_root
+                custom_instance.stickers = instance.stickers
+
+                custom_bot_reply_records = []
+                custom_record_bot_reply = custom_instance._record_bot_reply
+
+                def record_custom_bot_reply_once(session, **kwargs):
+                    custom_bot_reply_records.append((session, dict(kwargs)))
+                    return custom_record_bot_reply(session, **kwargs)
+
+                custom_instance._record_bot_reply = record_custom_bot_reply_once
+
+                # Selecting qq_custom has no effect on ordinary replies when
+                # the Agent did not invoke the sticker tool.
+                context.sent_messages.clear()
+                context.send_attempts.clear()
+                plain_image_event = FakeEvent(result=FakeResult("普通文字回复"))
+                plain_image_event._has_send_oper = True
+                await instance.decorate_sticker_result(plain_image_event)
+                await instance.after_message_sent(plain_image_event)
+                assert plain_image_event.result.chain[0].text == "普通文字回复"
+                assert context.send_attempts == []
+
+                context.sent_messages.clear()
+                context.send_attempts.clear()
+                plain_custom_event = FakeEvent(result=FakeResult("普通文字回复"))
+                plain_custom_event._has_send_oper = True
+                await custom_instance.decorate_sticker_result(plain_custom_event)
+                await custom_instance.after_message_sent(plain_custom_event)
+                assert plain_custom_event.result.chain[0].text == "普通文字回复"
+                assert context.send_attempts == []
+                assert len(custom_bot_reply_records) == 1
+                assert custom_bot_reply_records[0][0] == plain_custom_event.unified_msg_origin
+
+                custom_component = plugin._QQCustomStickerImageSegment(
+                    file="base64://cG5n",
+                    sub_type=1,
+                )
+                custom_dict = custom_component.toDict()
+                assert custom_dict["type"] == "image"
+                assert custom_dict["data"] == {
+                    "file": "base64://cG5n",
+                    "sub_type": 1,
+                }
+
+                # Context.send_message() returning False means no platform
+                # matched and no platform-adapter send occurred, so ordinary-
+                # image fallback is safe. The fallback is the only delivered part.
+                context.send_error = False
+                context.sent_messages.clear()
+                context.send_attempts.clear()
+                context.send_outcomes = [False, True]
+                custom_image_only_result = SimpleNamespace(chain=[])
+                custom_image_only_event = FakeEvent(
+                    attributes={
+                        plugin._STICKER_SELECTION_ATTR: {"path": str(image_path)},
+                        plugin._ENGAGEMENT_PENDING_ATTR: True,
+                    },
+                    result=custom_image_only_result,
+                )
+                await custom_instance.decorate_sticker_result(custom_image_only_event)
+                assert len(context.send_attempts) == 2
+                assert context.send_attempts[0][0].sub_type == 1
+                assert context.send_attempts[1][0].path == str(image_path)
+                assert len(context.sent_messages) == 1
+                assert context.sent_messages[0][0].path == str(image_path)
+                assert custom_image_only_result.chain == []
+                await custom_instance.after_message_sent(custom_image_only_event)
+                assert len(custom_bot_reply_records) == 2
+
+                context.sent_messages.clear()
+                context.send_attempts.clear()
+                custom_bot_reply_records.clear()
+                custom_success_result = SimpleNamespace(chain=[])
+                custom_success_event = FakeEvent(
+                    attributes={
+                        plugin._STICKER_SELECTION_ATTR: {"path": str(image_path)},
+                        plugin._ENGAGEMENT_PENDING_ATTR: True,
+                    },
+                    result=custom_success_result,
+                )
+                await custom_instance.decorate_sticker_result(custom_success_event)
+                assert len(context.sent_messages) == 1
+                assert context.sent_messages[0][0].sub_type == 1
+                assert context.sent_messages[0][0].toDict()["type"] == "image"
+                await custom_instance.after_message_sent(custom_success_event)
+                assert len(context.send_attempts) == 1
+                assert len(custom_bot_reply_records) == 1
+
+                # NapCat's NTEvent timeout is wrapped as ActionFailed even
+                # though QQ may accept and display the image later. Treat all
+                # ActionFailed payloads as ambiguous and never retry them.
+                nt_event_timeout = {
+                    "status": "failed",
+                    "retcode": 1400,
+                    "message": "Timeout: NTEvent",
+                    "wording": (
+                        "Timeout: NTEvent serviceAndMethod:"
+                        "NodeIKernelMsgService/sendMsg ListenerName:"
+                        "NodeIKernelMsgListener/onMsgInfoListUpdate EventRet: {}"
+                    ),
+                    "echo": {},
+                }
+                timeout_in_message = {
+                    "status": "failed",
+                    "retcode": 1400,
+                    "message": "synthetic timeout marker PRIVATE_RESULT_MARKER",
+                    "echo": {},
+                }
+                unknown_action_failure = {
+                    "status": "failed",
+                    "retcode": 1200,
+                    "message": "synthetic unknown failure PRIVATE_RESULT_MARKER",
+                    "echo": {},
+                }
+                for failure_result in (
+                    nt_event_timeout,
+                    timeout_in_message,
+                    unknown_action_failure,
+                ):
+                    context.sent_messages.clear()
+                    context.send_attempts.clear()
+                    context.send_outcomes = [_ActionFailed(failure_result)]
+                    ambiguous_result = SimpleNamespace(chain=[])
+                    ambiguous_event = FakeEvent(
+                        attributes={
+                            plugin._STICKER_SELECTION_ATTR: {
+                                "path": str(image_path),
+                            },
+                        },
+                        result=ambiguous_result,
+                    )
+                    log_start = len(log_records)
+                    await custom_instance.decorate_sticker_result(ambiguous_event)
+                    await custom_instance.after_message_sent(ambiguous_event)
+                    assert len(context.send_attempts) == 1
+                    assert context.send_attempts[0][0].sub_type == 1
+                    assert context.sent_messages == []
+                    assert ambiguous_result.chain == []
+                    assert "PRIVATE_RESULT_MARKER" not in repr(log_records[log_start:])
+                    assert "Timeout: NTEvent" not in repr(log_records[log_start:])
+
+                # If custom delivery times out after normal text was sent, keep
+                # the text and do not issue an ordinary-image retry.
+                context.sent_messages.clear()
+                context.send_attempts.clear()
+                context.send_outcomes = [_ActionFailed(nt_event_timeout)]
+                uncertain_text_result = FakeResult("先发送的文字保留")
+                uncertain_text_event = FakeEvent(
+                    attributes={
+                        plugin._STICKER_SELECTION_ATTR: {
+                            "path": str(image_path),
+                        },
+                    },
+                    result=uncertain_text_result,
+                )
+                uncertain_text_event._has_send_oper = True
+                await custom_instance.decorate_sticker_result(uncertain_text_event)
+                await custom_instance.after_message_sent(uncertain_text_event)
+                assert uncertain_text_result.chain[0].text == "先发送的文字保留"
+                assert len(context.send_attempts) == 1
+                assert context.send_attempts[0][0].sub_type == 1
+                assert context.sent_messages == []
+
+                # A definite no-platform result allows image fallback; if that
+                # fallback also confirms no send, retain one minimal text reply.
+                context.sent_messages.clear()
+                context.send_attempts.clear()
+                context.send_outcomes = [False, False]
+                fallback_failure_result = SimpleNamespace(chain=[])
+                fallback_failure_event = FakeEvent(
+                    attributes={
+                        plugin._STICKER_SELECTION_ATTR: {
+                            "path": str(image_path),
+                        },
+                    },
+                    result=fallback_failure_result,
+                )
+                await custom_instance.decorate_sticker_result(fallback_failure_event)
+                assert len(context.send_attempts) == 2
+                assert context.send_attempts[0][0].sub_type == 1
+                assert context.send_attempts[1][0].path == str(image_path)
+                assert context.sent_messages == []
+                assert [part.text for part in fallback_failure_result.chain] == [
+                    plugin._STICKER_SEND_FALLBACK_TEXT
+                ]
+
+                # A failed ordinary-image fallback with an ambiguous response
+                # must not create a second text fallback either.
+                context.sent_messages.clear()
+                context.send_attempts.clear()
+                context.send_outcomes = [False, _ActionFailed(nt_event_timeout)]
+                ambiguous_fallback_result = SimpleNamespace(chain=[])
+                ambiguous_fallback_event = FakeEvent(
+                    attributes={
+                        plugin._STICKER_SELECTION_ATTR: {
+                            "path": str(image_path),
+                        },
+                    },
+                    result=ambiguous_fallback_result,
+                )
+                await custom_instance.decorate_sticker_result(
+                    ambiguous_fallback_event
+                )
+                assert len(context.send_attempts) == 2
+                assert context.send_attempts[0][0].sub_type == 1
+                assert context.send_attempts[1][0].path == str(image_path)
+                assert context.sent_messages == []
+                assert ambiguous_fallback_result.chain == []
+
+                # Text is unaffected by custom delivery; the image remains a
+                # trailing, single OneBot send after all generated text parts.
+                context.sent_messages.clear()
+                context.send_attempts.clear()
+                custom_bot_reply_records.clear()
+                text_sticker_event = FakeEvent(
+                    attributes={
+                        plugin._STICKER_SELECTION_ATTR: {"path": str(image_path)},
+                        plugin._ENGAGEMENT_PENDING_ATTR: True,
+                    },
+                    result=FakeResult("先发送的文字"),
+                )
+                text_sticker_event._has_send_oper = True
+                await custom_instance.decorate_sticker_result(text_sticker_event)
+                assert text_sticker_event.result.chain[0].text == "先发送的文字"
+                await custom_instance.after_message_sent(text_sticker_event)
+                assert len(context.sent_messages) == 1
+                assert context.sent_messages[0][0].sub_type == 1
+                assert len(context.send_attempts) == 1
+                assert len(custom_bot_reply_records) == 1
+
+                # A definite local no-platform result falls back after the
+                # original text has been sent; text remains unchanged.
+                context.sent_messages.clear()
+                context.send_attempts.clear()
+                custom_bot_reply_records.clear()
+                context.send_outcomes = [False, True]
+                custom_text_result = FakeResult("文字不能丢失")
+                custom_text_failure_event = FakeEvent(
+                    attributes={
+                        plugin._STICKER_SELECTION_ATTR: {"path": str(image_path)},
+                        plugin._ENGAGEMENT_PENDING_ATTR: True,
+                    },
+                    result=custom_text_result,
+                )
+                custom_text_failure_event._has_send_oper = True
+                await custom_instance.decorate_sticker_result(custom_text_failure_event)
+                await custom_instance.after_message_sent(custom_text_failure_event)
+                assert custom_text_failure_event.result.chain[0].text == "文字不能丢失"
+                assert len(context.send_attempts) == 2
+                assert context.send_attempts[0][0].sub_type == 1
+                assert context.send_attempts[1][0].path == str(image_path)
+                assert len(custom_bot_reply_records) == 1
+
+                # Component construction failure happens before transmission,
+                # so the regular image fallback is safe.
+                original_segment = plugin._QQCustomStickerImageSegment
+
+                def raise_during_component_construction(**_kwargs):
+                    raise ValueError("synthetic construction failure")
+
+                plugin._QQCustomStickerImageSegment = raise_during_component_construction
+                context.sent_messages.clear()
+                context.send_attempts.clear()
+                construction_failure_result = SimpleNamespace(chain=[])
+                construction_failure_event = FakeEvent(
+                    attributes={
+                        plugin._STICKER_SELECTION_ATTR: {"path": str(image_path)},
+                    },
+                    result=construction_failure_result,
+                )
+                await custom_instance.decorate_sticker_result(construction_failure_event)
+                assert len(context.send_attempts) == 1
+                assert context.send_attempts[0][0].path == str(image_path)
+                assert construction_failure_result.chain == []
+                plugin._QQCustomStickerImageSegment = original_segment
+
+                # An ambiguous transport exception is never retried, because
+                # QQ may already have accepted the custom image.
+                context.sent_messages.clear()
+                context.send_attempts.clear()
+                context.send_outcomes = [RuntimeError("ambiguous transport")]
+                uncertain_result = SimpleNamespace(chain=[])
+                uncertain_event = FakeEvent(
+                    attributes={
+                        plugin._STICKER_SELECTION_ATTR: {"path": str(image_path)},
+                    },
+                    result=uncertain_result,
+                )
+                await custom_instance.decorate_sticker_result(uncertain_event)
+                assert len(context.send_attempts) == 1
+                assert context.send_attempts[0][0].sub_type == 1
+                assert uncertain_result.chain == []
+                assert context.sent_messages == []
+                assert str(image_path) not in repr(log_records)
+
+                # A failure anywhere in the decoration hook must leave a
+                # sendable text result rather than aborting the whole turn.
+                async def raise_during_sticker_decoration(_event, _selection):
+                    raise RuntimeError("synthetic decoration failure")
+
+                custom_instance._apply_sticker_selection = raise_during_sticker_decoration
+                decoration_failure_result = SimpleNamespace(chain=[])
+                decoration_failure_event = FakeEvent(
+                    attributes={
+                        plugin._STICKER_SELECTION_ATTR: {"path": str(image_path)},
+                    },
+                    result=decoration_failure_result,
+                )
+                await custom_instance.decorate_sticker_result(decoration_failure_event)
+                assert [component.text for component in decoration_failure_result.chain] == [
+                    plugin._STICKER_SEND_FALLBACK_TEXT
+                ]
+
+                # Opt-in INFO diagnostics follow AstrBot v4.28.2 tool hooks
+                # and never render tool arguments/results or event identifiers.
+                diag_instance = plugin.Yuuk1CorePlugin(
+                    context,
+                    {
+                        "allowed_groups": ["12345"],
+                        "stickers_enabled": True,
+                        "sticker_send_mode": "qq_custom",
+                        "sticker_diagnostics_enabled": True,
+                    },
+                )
+                diag_instance.sticker_root = sticker_root
+                diag_instance.stickers = instance.stickers
+                diag_tools = VisibleToolSet()
+                diag_event = FakeEvent(result=FakeResult(" (图) "))
+                diag_request = SimpleNamespace(
+                    system_prompt="",
+                    extra_user_content_parts=[],
+                    func_tool=diag_tools,
+                )
+                await diag_instance.customize_request(diag_event, diag_request)
+                assert diag_tools.tools == {"jingjing_sticker", "web_search"}
+                assert getattr(
+                    diag_event,
+                    plugin._STICKER_DIAGNOSTIC_STATE_ATTR,
+                )["tool_available"] is True
+                await diag_instance.on_using_llm_tool(
+                    diag_event,
+                    SimpleNamespace(name="jingjing_sticker"),
+                    {"category": "happy", "private_marker": "never-log"},
+                )
+                diag_tool_result = await diag_instance.jingjing_sticker_tool(
+                    diag_event,
+                    "happy",
+                )
+                await diag_instance.on_llm_tool_respond(
+                    diag_event,
+                    SimpleNamespace(name="jingjing_sticker"),
+                    {"private_marker": "never-log"},
+                    {"content": "never-log"},
+                )
+                assert "已选择" in diag_tool_result
+                await diag_instance.on_llm_response(
+                    diag_event,
+                    SimpleNamespace(
+                        result_chain=SimpleNamespace(chain=[_Plain(" (图) ")]),
+                        completion_text=" (图) ",
+                        reasoning_content="never-log-reasoning",
+                        raw_completion="never-log-provider-payload",
+                        tools_call_args=[{"private_marker": "never-log-tool-args"}],
+                    ),
+                )
+                diag_event._has_send_oper = True
+                context.send_attempts.clear()
+                context.sent_messages.clear()
+                await diag_instance.decorate_sticker_result(diag_event)
+                assert diag_event.result.chain[0].text == " (图) "
+                await diag_instance.after_message_sent(diag_event)
+                assert len(context.send_attempts) == 1
+                assert context.send_attempts[0][0].sub_type == 1
+
+                async def _prepare_boundary_event(
+                    diag_plugin,
+                    result,
+                    *,
+                    selected,
+                ):
+                    boundary_event = FakeEvent(result=result)
+                    request = SimpleNamespace(
+                        system_prompt="",
+                        extra_user_content_parts=[],
+                        func_tool=VisibleToolSet(),
+                    )
+                    await diag_plugin.customize_request(boundary_event, request)
+                    if selected:
+                        setattr(
+                            boundary_event,
+                            plugin._STICKER_SELECTION_ATTR,
+                            {"path": str(image_path)},
+                        )
+                        getattr(
+                            boundary_event,
+                            plugin._STICKER_DIAGNOSTIC_STATE_ATTR,
+                        )["tool_selected"] = True
+                    return boundary_event
+
+                # Boundary summaries only inspect counts and exact per-Plain
+                # markers. They leave image-only, normal text, and substring
+                # cases unchanged and do not add a second image send.
+                context.send_attempts.clear()
+                context.sent_messages.clear()
+                empty_diag_event = await _prepare_boundary_event(
+                    diag_instance,
+                    SimpleNamespace(chain=[]),
+                    selected=True,
+                )
+                await diag_instance.decorate_sticker_result(empty_diag_event)
+                assert empty_diag_event.result.chain == []
+                assert len(context.send_attempts) == 1
+                assert context.send_attempts[0][0].sub_type == 1
+                await diag_instance.after_message_sent(empty_diag_event)
+                assert len(context.send_attempts) == 1
+
+                normal_diag_event = await _prepare_boundary_event(
+                    diag_instance,
+                    FakeResult("一条普通文字回复"),
+                    selected=True,
+                )
+                normal_diag_event._has_send_oper = True
+                context.send_attempts.clear()
+                context.sent_messages.clear()
+                await diag_instance.decorate_sticker_result(normal_diag_event)
+                assert normal_diag_event.result.chain[0].text == "一条普通文字回复"
+                await diag_instance.after_message_sent(normal_diag_event)
+                assert len(context.send_attempts) == 1
+                assert context.send_attempts[0][0].sub_type == 1
+
+                substring_diag_event = await _prepare_boundary_event(
+                    diag_instance,
+                    FakeResult("说明里包含(图)但这是正常长文本"),
+                    selected=True,
+                )
+                substring_diag_event._has_send_oper = True
+                context.send_attempts.clear()
+                context.sent_messages.clear()
+                await diag_instance.decorate_sticker_result(substring_diag_event)
+                assert (
+                    substring_diag_event.result.chain[0].text
+                    == "说明里包含(图)但这是正常长文本"
+                )
+                await diag_instance.after_message_sent(substring_diag_event)
+                assert len(context.send_attempts) == 1
+                assert context.send_attempts[0][0].sub_type == 1
+
+                split_placeholder_event = await _prepare_boundary_event(
+                    diag_instance,
+                    SimpleNamespace(chain=[_Plain("("), _Plain("图)")]),
+                    selected=True,
+                )
+                split_placeholder_event._has_send_oper = True
+                context.send_attempts.clear()
+                context.sent_messages.clear()
+                await diag_instance.decorate_sticker_result(split_placeholder_event)
+                assert [item.text for item in split_placeholder_event.result.chain] == [
+                    "(",
+                    "图)",
+                ]
+                await diag_instance.after_message_sent(split_placeholder_event)
+                assert len(context.send_attempts) == 1
+                split_marker = getattr(
+                    split_placeholder_event,
+                    plugin._STICKER_DIAGNOSTIC_STATE_ATTR,
+                )["request_marker"]
+                assert any(
+                    f"request_marker={split_marker}" in line
+                    and "plain_component_count=2" in line
+                    and "result_component_count=2" in line
+                    and "exact_image_placeholder_present=false" in line
+                    for _, line in log_records
+                    if "stage=yuuk1_decoration_entry" in line
+                )
+
+                plain_no_sticker_event = await _prepare_boundary_event(
+                    diag_instance,
+                    FakeResult("没有调用 Sticker 的普通聊天"),
+                    selected=False,
+                )
+                context.send_attempts.clear()
+                await diag_instance.decorate_sticker_result(plain_no_sticker_event)
+                assert (
+                    plain_no_sticker_event.result.chain[0].text
+                    == "没有调用 Sticker 的普通聊天"
+                )
+                assert context.send_attempts == []
+
+                diag_image_instance = plugin.Yuuk1CorePlugin(
+                    context,
+                    {
+                        "allowed_groups": ["12345"],
+                        "stickers_enabled": True,
+                        "sticker_send_mode": "image",
+                        "sticker_diagnostics_enabled": True,
+                    },
+                )
+                diag_image_instance.sticker_root = sticker_root
+                diag_image_instance.stickers = instance.stickers
+                image_mode_text_event = await _prepare_boundary_event(
+                    diag_image_instance,
+                    FakeResult("image 模式保持原文"),
+                    selected=True,
+                )
+                image_mode_text_event._has_send_oper = True
+                context.send_attempts.clear()
+                context.sent_messages.clear()
+                await diag_image_instance.decorate_sticker_result(image_mode_text_event)
+                assert image_mode_text_event.result.chain[0].text == "image 模式保持原文"
+                await diag_image_instance.after_message_sent(image_mode_text_event)
+                assert len(context.send_attempts) == 1
+                assert context.send_attempts[0][0].path == str(image_path)
+
+                image_mode_empty_event = await _prepare_boundary_event(
+                    diag_image_instance,
+                    SimpleNamespace(chain=[]),
+                    selected=True,
+                )
+                context.send_attempts.clear()
+                context.sent_messages.clear()
+                await diag_image_instance.decorate_sticker_result(image_mode_empty_event)
+                assert image_mode_empty_event.result.chain == []
+                assert len(context.send_attempts) == 1
+                assert context.send_attempts[0][0].path == str(image_path)
+
+                # Image mode keeps its existing text fallback when its single
+                # image send has an ambiguous result.
+                context.send_attempts.clear()
+                context.sent_messages.clear()
+                context.send_outcomes = [_ActionFailed(nt_event_timeout)]
+                image_mode_uncertain_event = await _prepare_boundary_event(
+                    diag_image_instance,
+                    SimpleNamespace(chain=[]),
+                    selected=True,
+                )
+                await diag_image_instance.decorate_sticker_result(
+                    image_mode_uncertain_event
+                )
+                assert len(context.send_attempts) == 1
+                assert context.send_attempts[0][0].path == str(image_path)
+                assert [part.text for part in image_mode_uncertain_event.result.chain] == [
+                    plugin._STICKER_SEND_FALLBACK_TEXT
+                ]
+                await diag_image_instance.terminate()
+
+                no_call_event = FakeEvent(result=FakeResult("直接生成的文字"))
+                no_call_request = SimpleNamespace(
+                    system_prompt="",
+                    extra_user_content_parts=[],
+                    func_tool=VisibleToolSet(),
+                )
+                await diag_instance.customize_request(no_call_event, no_call_request)
+                await diag_instance.decorate_sticker_result(no_call_event)
+
+                context.send_outcomes = [False, True]
+                fallback_event = FakeEvent(
+                    attributes={
+                        plugin._STICKER_SELECTION_ATTR: {"path": str(image_path)},
+                    },
+                    result=FakeResult("文字先正常回复"),
+                )
+                fallback_event._has_send_oper = True
+                await diag_instance.decorate_sticker_result(fallback_event)
+                await diag_instance.after_message_sent(fallback_event)
+
+                context.send_attempts.clear()
+                context.sent_messages.clear()
+                context.send_outcomes = [_ActionFailed(nt_event_timeout)]
+                diag_ambiguous_event = FakeEvent(
+                    attributes={
+                        plugin._STICKER_SELECTION_ATTR: {
+                            "path": str(image_path),
+                        },
+                    },
+                    result=FakeResult("诊断模式保留文字"),
+                )
+                diag_ambiguous_event._has_send_oper = True
+                await diag_instance.decorate_sticker_result(diag_ambiguous_event)
+                await diag_instance.after_message_sent(diag_ambiguous_event)
+                assert len(context.send_attempts) == 1
+                assert context.send_attempts[0][0].sub_type == 1
+                assert diag_ambiguous_event.result.chain[0].text == "诊断模式保留文字"
+
+                diag_lines = [
+                    line
+                    for level, line in log_records
+                    if level == "info" and "Yuuk1 sticker_diag" in line
+                ]
+                assert any(
+                    "event=request stage=tool_visibility mode=qq_custom status=available"
+                    in line
+                    for line in diag_lines
+                )
+                assert any(
+                    "event=tool stage=llm_selected mode=qq_custom status=selected"
+                    in line
+                    for line in diag_lines
+                )
+                assert any(
+                    "event=tool stage=llm_tool_response mode=qq_custom status=returned"
+                    in line
+                    for line in diag_lines
+                )
+                assert any(
+                    "stage=handler mode=qq_custom status=entered" in line
+                    for line in diag_lines
+                )
+                assert any(
+                    "event=onebot_send stage=after_text_qq_custom mode=qq_custom status=api_completed"
+                    in line
+                    for line in diag_lines
+                )
+                assert any(
+                    "event=request stage=llm_response_visible mode=qq_custom "
+                    "status=observed" in line
+                    and "sticker_selection_present=true" in line
+                    and "plain_component_count=1" in line
+                    and "nonempty_plain_present=true" in line
+                    and "exact_image_placeholder_present=true" in line
+                    and "result_component_count=1" in line
+                    for line in diag_lines
+                )
+                assert any(
+                    "stage=yuuk1_decoration_entry" in line
+                    and "exact_image_placeholder_present=true" in line
+                    for line in diag_lines
+                )
+                assert any(
+                    "stage=yuuk1_decoration_complete" in line
+                    and "exact_image_placeholder_present=true" in line
+                    for line in diag_lines
+                )
+                assert any(
+                    "sticker_selection_present=true" in line
+                    and "plain_component_count=0" in line
+                    and "nonempty_plain_present=false" in line
+                    and "exact_image_placeholder_present=false" in line
+                    and "result_component_count=0" in line
+                    for line in diag_lines
+                )
+                assert any(
+                    "plain_component_count=1" in line
+                    and "nonempty_plain_present=true" in line
+                    and "exact_image_placeholder_present=false" in line
+                    for line in diag_lines
+                )
+                substring_marker = getattr(
+                    substring_diag_event,
+                    plugin._STICKER_DIAGNOSTIC_STATE_ATTR,
+                )["request_marker"]
+                assert any(
+                    f"request_marker={substring_marker}" in line
+                    and "plain_component_count=1" in line
+                    and "nonempty_plain_present=true" in line
+                    and "exact_image_placeholder_present=false" in line
+                    for line in diag_lines
+                )
+                assert any(
+                    "event=request" in line
+                    and "mode=image" in line
+                    and "stage=yuuk1_decoration_complete" in line
+                    for line in diag_lines
+                )
+                assert any(
+                    "event=tool stage=selection_result mode=qq_custom status=tool_not_called"
+                    in line
+                    for line in diag_lines
+                )
+                not_exposed_event = FakeEvent(result=FakeResult("普通文字"))
+                not_exposed_request = SimpleNamespace(
+                    system_prompt="",
+                    extra_user_content_parts=[],
+                    func_tool=SimpleNamespace(tools=[SimpleNamespace(name="web_search")]),
+                )
+                await diag_instance.customize_request(
+                    not_exposed_event,
+                    not_exposed_request,
+                )
+                await diag_instance.decorate_sticker_result(not_exposed_event)
+                diag_lines = [
+                    line
+                    for level, line in log_records
+                    if level == "info" and "Yuuk1 sticker_diag" in line
+                ]
+                assert any(
+                    "event=tool stage=selection_result mode=qq_custom status=tool_not_exposed"
+                    in line
+                    for line in diag_lines
+                )
+                assert any(
+                    "event=onebot_send stage=after_text_qq_custom mode=qq_custom status=platform_unavailable"
+                    in line
+                    for line in diag_lines
+                )
+                assert any(
+                    "event=onebot_send stage=after_text_qq_custom mode=qq_custom status=ambiguous"
+                    in line
+                    for line in diag_lines
+                )
+                assert any(
+                    "event=sticker_fallback stage=ordinary_image mode=image status=attempted"
+                    in line
+                    for line in diag_lines
+                )
+                assert any(
+                    "event=onebot_send stage=after_text_image_fallback mode=image status=api_completed"
+                    in line
+                    for line in diag_lines
+                )
+                assert all(
+                    marker not in "\n".join(diag_lines)
+                    for marker in (
+                        "never-log",
+                        "synthetic-user",
+                        "synthetic-bot",
+                        "12345",
+                        str(image_path),
+                        image_path.name,
+                        "(图)",
+                        "一条普通文字回复",
+                        "说明里包含(图)但这是正常长文本",
+                        "没有调用 Sticker 的普通聊天",
+                        "never-log-reasoning",
+                        "never-log-provider-payload",
+                        "never-log-tool-args",
+                    )
+                )
+                diag_count_before_disabled = len(diag_lines)
+                quiet_event = FakeEvent(result=FakeResult("诊断关闭时的文字"))
+                quiet_request = SimpleNamespace(
+                    system_prompt="",
+                    extra_user_content_parts=[],
+                    func_tool=VisibleToolSet(),
+                )
+                await custom_instance.customize_request(quiet_event, quiet_request)
+                await custom_instance.on_llm_response(
+                    quiet_event,
+                    SimpleNamespace(result_chain=SimpleNamespace(chain=[_Plain("(图)")]))
+                )
+                await custom_instance.decorate_sticker_result(quiet_event)
+                after_quiet_lines = [
+                    line
+                    for level, line in log_records
+                    if level == "info" and "Yuuk1 sticker_diag" in line
+                ]
+                assert len(after_quiet_lines) == diag_count_before_disabled
+                await diag_instance.terminate()
+
+                # The observer still rejects self-authored messages in custom
+                # mode, and a disabled sticker setting exposes no selection.
+                plugin._ACTIVE_SETTINGS = custom_instance.settings
+                self_loop_event = FakeEvent(
+                    sender_id="synthetic-bot",
+                    self_id="synthetic-bot",
+                    message_str="鲸鲸自己的图片",
+                )
+                before_self_message = context.llm_calls
+                instance.group_context.clear()
+                assert [item async for item in custom_instance.on_group_message(self_loop_event)] == []
+                assert context.llm_calls == before_self_message
+                assert custom_instance.group_context.recent(
+                    self_loop_event.unified_msg_origin,
+                    now=time.monotonic(),
+                ) == ()
+                disabled_custom_instance = plugin.Yuuk1CorePlugin(
+                    context,
+                    {
+                        "allowed_groups": ["12345"],
+                        "stickers_enabled": False,
+                        "sticker_send_mode": "qq_custom",
+                    },
+                )
+                disabled_custom_event = FakeEvent()
+                context.send_attempts.clear()
+                disabled_reply = await disabled_custom_instance.jingjing_sticker_tool(
+                    disabled_custom_event,
+                    "happy",
+                )
+                assert "当前关闭" in disabled_reply
+                assert getattr(
+                    disabled_custom_event,
+                    plugin._STICKER_SELECTION_ATTR,
+                    None,
+                ) is None
+                assert context.send_attempts == []
+                disabled_tools = FakeToolSet()
+                disabled_request = SimpleNamespace(
+                    system_prompt="",
+                    extra_user_content_parts=[],
+                    func_tool=disabled_tools,
+                )
+                await disabled_custom_instance.customize_request(
+                    FakeEvent(),
+                    disabled_request,
+                )
+                assert disabled_tools.tools == {"web_search"}
+                await disabled_custom_instance.terminate()
+                await custom_instance.terminate()
             await instance.terminate()
             await disabled_instance.terminate()
             await identity_only_instance.terminate()

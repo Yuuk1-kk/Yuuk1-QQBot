@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import random
@@ -12,9 +13,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from aiocqhttp.exceptions import ActionFailed
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
-from astrbot.api.message_components import Image, Plain
+from astrbot.api.message_components import (
+    BaseMessageComponent,
+    ComponentType,
+    Image,
+    Plain,
+)
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.agent.message import TextPart
@@ -47,9 +54,11 @@ from .logic import (
 from .multi_message import split_natural_messages
 from .presence import ManagedAsyncTask, idle_is_eligible
 from .stickers import (
+    QQ_CUSTOM_IMAGE_SUB_TYPE,
     STICKER_CATEGORIES,
     STICKER_CATEGORY_DESCRIPTIONS,
     STICKER_ONLY,
+    STICKER_SEND_MODE_QQ_CUSTOM,
     TEXT_AND_STICKER,
     StickerCatalog,
     decoration_action,
@@ -75,9 +84,18 @@ _PENDING_TEXT_PARTS_ATTR = "_yuuk1_pending_text_parts"
 _FULL_REPLY_TEXT_ATTR = "_yuuk1_full_reply_text"
 _STICKER_SELECTION_ATTR = "_yuuk1_sticker_selection"
 _STICKER_TOOL_USED_ATTR = "_yuuk1_sticker_tool_used"
+_STICKER_DIAGNOSTIC_STATE_ATTR = "_yuuk1_sticker_diagnostic_state"
 _PENDING_STICKER_ATTR = "_yuuk1_pending_sticker"
 _STICKER_ONLY_SENT_ATTR = "_yuuk1_sticker_only_sent"
 _STICKER_SEND_FALLBACK_TEXT = "鲸鲸在这儿。"
+
+
+class _QQCustomStickerImageSegment(BaseMessageComponent):
+    """OneBot image segment serialized by AstrBot's generic component path."""
+
+    type: ComponentType = ComponentType.Image
+    file: str
+    sub_type: int = QQ_CUSTOM_IMAGE_SUB_TYPE
 
 _IDLE_FREE_TALK_DECISION_SYSTEM = (
     "你是群聊发言门控器，不是聊天机器人。结合近期消息和当前消息判断鲸鲸是否适合主动加入普通群聊。"
@@ -230,9 +248,11 @@ class Yuuk1CorePlugin(Star):
                 "Yuuk1 skipped %s invalid local sticker asset(s).", rejected_assets
             )
         logger.info(
-            "Yuuk1 Sticker subsystem ready; assets=%s; tool_available=%s",
+            "Yuuk1 Sticker subsystem ready; assets=%s; tool_available=%s; send_mode=%s; diagnostics=%s",
             self.stickers.asset_count,
             self.settings.stickers_enabled and self.stickers.asset_count > 0,
+            self.settings.sticker_send_mode,
+            self.settings.sticker_diagnostics_enabled,
         )
 
     async def initialize(self) -> None:
@@ -466,6 +486,14 @@ class Yuuk1CorePlugin(Star):
         normal_wake_or_at = bool(
             at_bot or getattr(event, "is_at_or_wake_command", False)
         )
+        if (
+            self.settings.stickers_enabled
+            and self.settings.sticker_send_mode == STICKER_SEND_MODE_QQ_CUSTOM
+        ):
+            logger.debug(
+                "Yuuk1 qq_custom diag event=group_message stage=observer wake_or_at=%s",
+                normal_wake_or_at,
+            )
 
         collect_context = self._should_collect_group_context()
         if (
@@ -832,6 +860,29 @@ class Yuuk1CorePlugin(Star):
                     self.settings.stickers_enabled and self.stickers.asset_count > 0
                 ),
             )
+            if self.settings.sticker_diagnostics_enabled:
+                tool_available = self._request_has_sticker_tool(req)
+                try:
+                    request_marker = os.urandom(4).hex()
+                except Exception:
+                    request_marker = None
+                diagnostic_state: dict[str, bool | str] = {
+                    "tool_available": tool_available,
+                    "tool_selected": False,
+                    "tool_entered": False,
+                }
+                if request_marker is not None:
+                    diagnostic_state["request_marker"] = request_marker
+                setattr(
+                    event,
+                    _STICKER_DIAGNOSTIC_STATE_ATTR,
+                    diagnostic_state,
+                )
+                self._sticker_diag(
+                    "request",
+                    "tool_visibility",
+                    "available" if tool_available else "unavailable",
+                )
             persona_parts = [f"你的名字是 {self.settings.bot_name}。"]
             if self.settings.system_prompt:
                 persona_parts.append(self.settings.system_prompt)
@@ -870,15 +921,227 @@ class Yuuk1CorePlugin(Star):
                             )
                         ).mark_as_temp()
                     )
-        except Exception:
+        except Exception as exc:
             event.stop_event()
             logger.error("Yuuk1 failed while preparing the request policy.")
+            self._sticker_diag(
+                "request",
+                "policy_prepare",
+                "error",
+                exception_type=type(exc).__name__,
+            )
             try:
                 await event.send(
                     event.plain_result("Bot 暂时无法处理这条请求，请稍后再试。")
                 )
             except Exception:
                 logger.warning("Could not send the Yuuk1 request error notice.")
+
+    @staticmethod
+    def _request_has_sticker_tool(request: ProviderRequest) -> bool:
+        """Inspect AstrBot v4.28.2's request ToolSet without logging tool data."""
+        tool_set = getattr(request, "func_tool", None)
+        tools = getattr(tool_set, "tools", None)
+        if isinstance(tools, dict):
+            return "jingjing_sticker" in tools
+        if isinstance(tools, (list, tuple, set, frozenset)):
+            for tool in tools:
+                name = tool if isinstance(tool, str) else getattr(tool, "name", None)
+                if name == "jingjing_sticker":
+                    return True
+        get_tool = getattr(tool_set, "get_tool", None)
+        return bool(callable(get_tool) and get_tool("jingjing_sticker") is not None)
+
+    def _sticker_diag(
+        self,
+        event_name: str,
+        stage: str,
+        status: str,
+        *,
+        mode: str | None = None,
+        exception_type: str | None = None,
+        request_marker: str | None = None,
+        sticker_selection_present: bool | None = None,
+        plain_component_count: int | None = None,
+        nonempty_plain_present: bool | None = None,
+        exact_image_placeholder_present: bool | None = None,
+        result_component_count: int | None = None,
+    ) -> None:
+        """Emit opt-in, allowlisted Sticker execution diagnostics only."""
+        if not self.settings.sticker_diagnostics_enabled:
+            return
+        safe_event = event_name if event_name.isidentifier() else "sticker"
+        safe_stage = stage if stage.isidentifier() else "unknown"
+        safe_status = status if status.isidentifier() else "unknown"
+        safe_mode = mode or self.settings.sticker_send_mode
+        if safe_mode not in {"image", "qq_custom"}:
+            safe_mode = "image"
+        safe_exception = exception_type or "none"
+        if not safe_exception.isidentifier():
+            safe_exception = "StickerError"
+        if request_marker is not None:
+            safe_marker = (
+                request_marker
+                if len(request_marker) == 8
+                and all(char in "0123456789abcdef" for char in request_marker)
+                else "invalid"
+            )
+            safe_plain_count = (
+                plain_component_count
+                if type(plain_component_count) is int and plain_component_count >= 0
+                else 0
+            )
+            safe_result_count = (
+                result_component_count
+                if type(result_component_count) is int and result_component_count >= 0
+                else 0
+            )
+            logger.info(
+                "Yuuk1 sticker_diag event=%s stage=%s mode=%s status=%s "
+                "exception_type=%s request_marker=%s "
+                "sticker_selection_present=%s plain_component_count=%s "
+                "nonempty_plain_present=%s exact_image_placeholder_present=%s "
+                "result_component_count=%s",
+                safe_event,
+                safe_stage,
+                safe_mode,
+                safe_status,
+                safe_exception,
+                safe_marker,
+                str(bool(sticker_selection_present)).lower(),
+                safe_plain_count,
+                str(bool(nonempty_plain_present)).lower(),
+                str(bool(exact_image_placeholder_present)).lower(),
+                safe_result_count,
+            )
+            return
+        logger.info(
+            "Yuuk1 sticker_diag event=%s stage=%s mode=%s status=%s exception_type=%s",
+            safe_event,
+            safe_stage,
+            safe_mode,
+            safe_status,
+            safe_exception,
+        )
+
+    def _sticker_diag_result_boundary(
+        self,
+        event: AstrMessageEvent,
+        stage: str,
+        status: str,
+        components: object,
+    ) -> None:
+        """Log counts and exact per-Plain markers without retaining message text.
+
+        Multiple Plain components are inspected independently and never joined.
+        Thus a component whose stripped text is exactly ``(图)`` is detected,
+        while a longer component containing those characters is not.
+        """
+        if not self.settings.sticker_diagnostics_enabled:
+            return
+        try:
+            state = getattr(event, _STICKER_DIAGNOSTIC_STATE_ATTR, None)
+            if not isinstance(state, dict):
+                return
+            marker = state.get("request_marker")
+            if not isinstance(marker, str):
+                return
+            if not isinstance(components, (list, tuple)):
+                components = ()
+            plain_components = [component for component in components if isinstance(component, Plain)]
+            plain_texts = [
+                component.text
+                for component in plain_components
+                if isinstance(getattr(component, "text", None), str)
+            ]
+            self._sticker_diag(
+                "request",
+                stage,
+                status,
+                mode=self.settings.sticker_send_mode,
+                request_marker=marker,
+                sticker_selection_present=isinstance(
+                    getattr(event, _STICKER_SELECTION_ATTR, None), dict
+                ),
+                plain_component_count=len(plain_components),
+                nonempty_plain_present=any(text.strip() for text in plain_texts),
+                exact_image_placeholder_present=any(
+                    text.strip() == "(图)" for text in plain_texts
+                ),
+                result_component_count=len(components),
+            )
+        except Exception:
+            # Diagnostics must never affect request or message delivery.
+            return
+
+    @filter.on_llm_response()
+    async def on_llm_response(
+        self,
+        event: AstrMessageEvent,
+        response: object,
+    ) -> None:
+        """Observe the Agent-visible response, not the Provider raw payload."""
+        if not self.settings.sticker_diagnostics_enabled or not self._is_qq(event):
+            return
+        state = getattr(event, _STICKER_DIAGNOSTIC_STATE_ATTR, None)
+        if not isinstance(state, dict):
+            return
+        if not (
+            state.get("tool_selected")
+            or state.get("tool_entered")
+            or isinstance(getattr(event, _STICKER_SELECTION_ATTR, None), dict)
+        ):
+            return
+
+        try:
+            response_chain = getattr(response, "result_chain", None)
+            if response_chain is not None:
+                components = getattr(response_chain, "chain", None)
+            else:
+                completion_text = getattr(response, "completion_text", None)
+                components = (
+                    [Plain(completion_text)]
+                    if isinstance(completion_text, str) and completion_text
+                    else []
+                )
+            self._sticker_diag_result_boundary(
+                event,
+                "llm_response_visible",
+                "observed",
+                components,
+            )
+        except Exception:
+            # Reading an optional diagnostic boundary must not fail the Agent hook.
+            return
+
+    @filter.on_using_llm_tool()
+    async def on_using_llm_tool(
+        self,
+        event: AstrMessageEvent,
+        tool: object,
+        tool_args: dict | None,
+    ) -> None:
+        """Record AstrBot's pre-call signal without reading or logging arguments."""
+        del tool_args
+        if getattr(tool, "name", None) != "jingjing_sticker":
+            return
+        state = getattr(event, _STICKER_DIAGNOSTIC_STATE_ATTR, None)
+        if isinstance(state, dict):
+            state["tool_selected"] = True
+        self._sticker_diag("tool", "llm_selected", "selected")
+
+    @filter.on_llm_tool_respond()
+    async def on_llm_tool_respond(
+        self,
+        event: AstrMessageEvent,
+        tool: object,
+        tool_args: dict | None,
+        tool_result: object,
+    ) -> None:
+        """Record completion status only; tool arguments and result are private."""
+        del tool_args, tool_result
+        if getattr(tool, "name", None) == "jingjing_sticker":
+            self._sticker_diag("tool", "llm_tool_response", "returned")
 
     @filter.llm_tool(name="jingjing_sticker")
     async def jingjing_sticker_tool(
@@ -891,14 +1154,32 @@ class Yuuk1CorePlugin(Star):
         Args:
             category(string): 只能选择下列分类：happy（开心、轻快、被夸或积极回应）；angry（轻微生气、嘴硬或被叫大肥鱼后的抗议）；speechless（无语、绷不住或不知道说什么）；smug（得意、嘴硬或轻微挑衅）；sad（难过、委屈或低落）；confused（疑惑、没听懂或问号）；laugh（大笑、觉得好玩或绷不住）；peek（探头、出现或偷偷看）；fatfish（大肥鱼相关自嘲、抗议或鲸鲸梗）；neutral（普通、平静或低强度反应）。
         """
+        state = getattr(event, _STICKER_DIAGNOSTIC_STATE_ATTR, None)
+        if isinstance(state, dict):
+            state["tool_entered"] = True
+        self._sticker_diag("tool", "handler", "entered")
         if not self.settings.stickers_enabled:
+            self._sticker_diag("tool", "selection", "disabled")
             return "鲸鲸表情功能当前关闭，请只用文字完成回复。"
         if category not in STICKER_CATEGORIES:
+            self._sticker_diag("tool", "selection", "invalid_category")
             return "表情分类不受支持，请只用文字完成回复。"
         if bool(getattr(event, _STICKER_TOOL_USED_ATTR, False)):
+            self._sticker_diag("tool", "selection", "already_selected")
             return "本轮已经选择过表情，请继续完成回复，不要再选择。"
-        selection = self.stickers.select(category, "global")
+        try:
+            selection = self.stickers.select(category, "global")
+        except Exception as exc:
+            self._log_sticker_send_failed("tool_select", type(exc).__name__)
+            self._sticker_diag(
+                "tool",
+                "selection",
+                "error",
+                exception_type=type(exc).__name__,
+            )
+            return "鲸鲸表情暂时无法使用，请只用文字完成回复。"
         if selection is None:
+            self._sticker_diag("tool", "selection", "no_asset")
             return "当前没有可用的鲸鲸表情图片，请只用文字完成回复。"
         path, selected_category = selection
         setattr(event, _STICKER_TOOL_USED_ATTR, True)
@@ -910,6 +1191,7 @@ class Yuuk1CorePlugin(Star):
                 "category": selected_category,
             },
         )
+        self._sticker_diag("tool", "selection", "selected")
         return (
             f"已选择 {STICKER_CATEGORY_DESCRIPTIONS[selected_category]} 表情。"
             "请根据当前语境自然回复；如果文字没有额外价值，可以只发这张表情。"
@@ -920,9 +1202,198 @@ class Yuuk1CorePlugin(Star):
     async def decorate_sticker_result(self, event: AstrMessageEvent) -> None:
         """Queue optional sticker art and split eligible final text for delivery."""
         selection = getattr(event, _STICKER_SELECTION_ATTR, None)
+        diagnostic_state = getattr(event, _STICKER_DIAGNOSTIC_STATE_ATTR, None)
+        if (
+            self.settings.sticker_diagnostics_enabled
+            and self._is_qq(event)
+            and (isinstance(diagnostic_state, dict) or isinstance(selection, dict))
+        ):
+            self._sticker_diag(
+                "reply_decoration",
+                "entered",
+                "selection_present" if isinstance(selection, dict) else "no_selection",
+            )
+            result = event.get_result()
+            self._sticker_diag_result_boundary(
+                event,
+                "yuuk1_decoration_entry",
+                "observed",
+                getattr(result, "chain", None),
+            )
+            if not isinstance(selection, dict):
+                state = diagnostic_state
+                if isinstance(state, dict):
+                    if not state.get("tool_available", False):
+                        status = "tool_not_exposed"
+                    elif state.get("tool_entered", False):
+                        status = "tool_called_no_selection"
+                    elif state.get("tool_selected", False):
+                        status = "selected_handler_not_entered"
+                    else:
+                        status = "tool_not_called"
+                    self._sticker_diag("tool", "selection_result", status)
         if isinstance(selection, dict):
-            await self._apply_sticker_selection(event, selection)
+            self._sticker_diag("reply_decoration", "apply_selection", "started")
+            try:
+                await self._apply_sticker_selection(event, selection)
+            except Exception as exc:
+                # A failed optional sticker must not abort AstrBot's already
+                # generated text or leave an empty image-only result.
+                self._log_sticker_send_failed("decorate", type(exc).__name__)
+                self._sticker_diag(
+                    "reply_decoration",
+                    "apply_selection",
+                    "error",
+                    exception_type=type(exc).__name__,
+                )
+                setattr(event, _STICKER_SELECTION_ATTR, None)
+                setattr(event, _PENDING_STICKER_ATTR, None)
+                self._ensure_sticker_text_fallback(event, stage="decoration_error")
+            else:
+                self._sticker_diag(
+                    "reply_decoration",
+                    "apply_selection",
+                    "completed",
+                )
         self._prepare_multi_message_parts(event)
+        if (
+            self.settings.sticker_diagnostics_enabled
+            and self._is_qq(event)
+            and (
+                isinstance(diagnostic_state, dict)
+                or isinstance(getattr(event, _STICKER_SELECTION_ATTR, None), dict)
+            )
+        ):
+            result = event.get_result()
+            self._sticker_diag_result_boundary(
+                event,
+                "yuuk1_decoration_complete",
+                "completed",
+                getattr(result, "chain", None),
+            )
+
+    async def _send_sticker_component(
+        self,
+        event: AstrMessageEvent,
+        component: BaseMessageComponent,
+        *,
+        stage: str,
+        mode: str,
+    ) -> str:
+        """Return api_completed/rejected/ambiguous without retrying uncertain sends."""
+        self._sticker_diag("onebot_send", stage, "started", mode=mode)
+        try:
+            sent = await self.context.send_message(
+                event.unified_msg_origin,
+                MessageChain([component]),
+            )
+        except ActionFailed as exc:
+            self._log_sticker_send_failed(stage, type(exc).__name__)
+            self._sticker_diag(
+                "onebot_send",
+                stage,
+                "ambiguous",
+                mode=mode,
+                exception_type=type(exc).__name__,
+            )
+            # ActionFailed only says the OneBot API operation failed. NapCat can
+            # wrap an NTEvent acknowledgement timeout in this exception after
+            # the message may already have reached QQ, so it is not safe to retry.
+            return "ambiguous"
+        except Exception as exc:
+            # A transport error can arrive after QQ accepted the message. Do not
+            # send a second image when delivery is uncertain.
+            self._log_sticker_send_failed(stage, type(exc).__name__)
+            self._sticker_diag(
+                "onebot_send",
+                stage,
+                "ambiguous",
+                mode=mode,
+                exception_type=type(exc).__name__,
+            )
+            return "ambiguous"
+        if sent:
+            # Context.send_message() returns True when a matching platform was
+            # found and its send coroutine returned normally; it does not prove
+            # that a QQ client rendered the media.
+            self._sticker_diag("onebot_send", stage, "api_completed", mode=mode)
+            return "api_completed"
+        self._log_sticker_send_failed(stage, "SendRejected")
+        self._sticker_diag(
+            "onebot_send", stage, "platform_unavailable", mode=mode
+        )
+        return "rejected"
+
+    async def _send_sticker_image(
+        self,
+        event: AstrMessageEvent,
+        path: Path,
+        *,
+        stage: str,
+    ) -> str:
+        """Send custom emoji, falling back only when no send was accepted."""
+        self._sticker_diag(
+            "sticker_send",
+            "prepare",
+            "started",
+            mode=self.settings.sticker_send_mode,
+        )
+        if self.settings.sticker_send_mode == STICKER_SEND_MODE_QQ_CUSTOM:
+            try:
+                encoded = await asyncio.to_thread(
+                    lambda: base64.b64encode(path.read_bytes()).decode("ascii")
+                )
+                custom_image = _QQCustomStickerImageSegment(
+                    file=f"base64://{encoded}",
+                    sub_type=QQ_CUSTOM_IMAGE_SUB_TYPE,
+                )
+            except Exception as exc:
+                # Preparation failed before any send was attempted, so fallback
+                # cannot duplicate a delivered QQ message.
+                self._log_sticker_send_failed("custom_prepare", type(exc).__name__)
+                self._sticker_diag(
+                    "sticker_send",
+                    "custom_prepare",
+                    "error",
+                    mode=STICKER_SEND_MODE_QQ_CUSTOM,
+                    exception_type=type(exc).__name__,
+                )
+            else:
+                custom_result = await self._send_sticker_component(
+                    event,
+                    custom_image,
+                    stage=f"{stage}_qq_custom",
+                    mode=STICKER_SEND_MODE_QQ_CUSTOM,
+                )
+                if custom_result != "rejected":
+                    return custom_result
+                self._sticker_diag(
+                    "sticker_fallback",
+                    "ordinary_image",
+                    "attempted",
+                    mode="image",
+                )
+
+        try:
+            image = Image.fromFileSystem(str(path))
+        except Exception as exc:
+            self._log_sticker_send_failed(f"{stage}_image_prepare", type(exc).__name__)
+            self._sticker_diag(
+                "sticker_send",
+                "image_prepare",
+                "error",
+                mode="image",
+                exception_type=type(exc).__name__,
+            )
+            return "rejected"
+        return await self._send_sticker_component(
+            event,
+            image,
+            stage=f"{stage}_image_fallback"
+            if self.settings.sticker_send_mode == STICKER_SEND_MODE_QQ_CUSTOM
+            else stage,
+            mode="image",
+        )
 
     async def _apply_sticker_selection(
         self,
@@ -931,6 +1402,7 @@ class Yuuk1CorePlugin(Star):
     ) -> None:
         path_value = selection.get("path")
         if not isinstance(path_value, str):
+            self._sticker_diag("reply_decoration", "asset_validation", "invalid")
             return
         result = event.get_result()
         mode = (
@@ -945,37 +1417,43 @@ class Yuuk1CorePlugin(Star):
         )
         if path is None:
             if mode == STICKER_ONLY:
-                self._ensure_sticker_text_fallback(event)
+                self._ensure_sticker_text_fallback(event, stage="asset_validation")
             self._log_sticker_send_failed("validate", validation_error or "InvalidAsset")
+            self._sticker_diag(
+                "reply_decoration",
+                "asset_validation",
+                "failed",
+                exception_type=validation_error or "InvalidAsset",
+            )
             return
         mode = normalize_sticker_mode(mode)
         image_available = True
         action = decoration_action(mode, image_available)
         if action == "text_fallback":
             self._log_sticker_send_failed("validate", "InvalidAsset")
-            return
-
-        try:
-            image = Image.fromFileSystem(str(path))
-        except Exception as exc:
-            if action == "image_only":
-                self._ensure_sticker_text_fallback(event)
-            self._log_sticker_send_failed("image_prepare", type(exc).__name__)
+            self._sticker_diag(
+                "reply_decoration",
+                "asset_validation",
+                "failed",
+                exception_type="InvalidAsset",
+            )
             return
 
         if action == "image_only":
-            try:
-                sent = await self.context.send_message(
-                    event.unified_msg_origin,
-                    MessageChain([image]),
-                )
-            except Exception as exc:
-                self._ensure_sticker_text_fallback(event)
-                self._log_sticker_send_failed("image_send", type(exc).__name__)
-                return
-            if not sent:
-                self._ensure_sticker_text_fallback(event)
-                self._log_sticker_send_failed("image_send", "SendRejected")
+            send_result = await self._send_sticker_image(
+                event,
+                path,
+                stage="image_only",
+            )
+            if send_result != "api_completed":
+                if not (
+                    self.settings.sticker_send_mode == STICKER_SEND_MODE_QQ_CUSTOM
+                    and send_result == "ambiguous"
+                ):
+                    self._ensure_sticker_text_fallback(
+                        event,
+                        stage="image_only_send",
+                    )
                 return
             if result is not None and result.chain is not None:
                 result.chain.clear()
@@ -995,6 +1473,12 @@ class Yuuk1CorePlugin(Star):
         # The original text is sent first. The after-send hook delivers the
         # sticker after any additional natural text parts.
         setattr(event, _PENDING_STICKER_ATTR, str(path))
+        self._sticker_diag(
+            "reply_decoration",
+            "sticker_queue",
+            "queued",
+            mode=self.settings.sticker_send_mode,
+        )
 
     def _prepare_multi_message_parts(self, event: AstrMessageEvent) -> None:
         if (
@@ -1075,27 +1559,20 @@ class Yuuk1CorePlugin(Star):
                     "validate_after_text",
                     validation_error or "InvalidAsset",
                 )
+                self._sticker_diag(
+                    "sticker_send",
+                    "asset_validation_after_text",
+                    "failed",
+                    exception_type=validation_error or "InvalidAsset",
+                )
                 sticker_sent = False
             else:
-                try:
-                    image = Image.fromFileSystem(str(path))
-                    sticker_sent = bool(
-                        await self.context.send_message(
-                            event.unified_msg_origin,
-                            MessageChain([image]),
-                        )
-                    )
-                    if not sticker_sent:
-                        self._log_sticker_send_failed(
-                            "image_send_after_text",
-                            "SendRejected",
-                        )
-                except Exception as exc:
-                    self._log_sticker_send_failed(
-                        "image_send_after_text",
-                        type(exc).__name__,
-                    )
-                    sticker_sent = False
+                send_result = await self._send_sticker_image(
+                    event,
+                    path,
+                    stage="after_text",
+                )
+                sticker_sent = send_result == "api_completed"
         elif isinstance(pending_path, str) and not text_parts_sent:
             sticker_sent = False
 
@@ -1139,6 +1616,24 @@ class Yuuk1CorePlugin(Star):
             )
         elif not whole_turn_succeeded and pending_engagement:
             logger.debug("Yuuk1 Free Talk skipped; reason=delivery_incomplete")
+        if self.settings.sticker_diagnostics_enabled and self._is_qq(event):
+            if sticker_only_sent:
+                delivery_status = (
+                    "image_only_api_completed" if sticker_sent else "image_only_failed"
+                )
+            elif isinstance(pending_path, str):
+                delivery_status = (
+                    "text_and_sticker_completed"
+                    if whole_turn_succeeded and sticker_sent
+                    else "text_preserved_sticker_failed"
+                )
+            else:
+                delivery_status = "no_sticker_send"
+            self._sticker_diag(
+                "reply_delivery",
+                "after_message_sent",
+                delivery_status,
+            )
 
     @staticmethod
     def _result_contains_text(result: object) -> bool:
@@ -1153,13 +1648,19 @@ class Yuuk1CorePlugin(Star):
                 return True
         return False
 
-    @classmethod
-    def _ensure_sticker_text_fallback(cls, event: AstrMessageEvent) -> None:
+    def _ensure_sticker_text_fallback(
+        self,
+        event: AstrMessageEvent,
+        *,
+        stage: str,
+    ) -> None:
         """Keep a minimal text reply when an image-only result cannot be sent."""
         result = event.get_result()
-        if result is None or cls._result_contains_text(result):
+        if result is None or self._result_contains_text(result):
+            self._sticker_diag("text_fallback", stage, "existing_text_preserved")
             return
         result.chain = [Plain(_STICKER_SEND_FALLBACK_TEXT)]
+        self._sticker_diag("text_fallback", stage, "inserted")
 
     @staticmethod
     def _log_sticker_send_failed(stage: str, exception_type: str) -> None:

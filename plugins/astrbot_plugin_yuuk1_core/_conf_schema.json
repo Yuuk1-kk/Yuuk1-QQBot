@@ -166,6 +166,18 @@
     "default": false,
     "hint": "默认关闭。仅当受控素材目录内存在通过图片解码校验的 PNG/JPG/JPEG 时才向当前请求提供 jingjing_sticker 工具。"
   },
+  "sticker_send_mode": {
+    "description": "Sticker：QQ 图片发送模式",
+    "type": "string",
+    "default": "image",
+    "hint": "image 使用普通图片；qq_custom 尝试 OneBot image sub_type=1。发送前准备失败或未匹配到平台时回退普通图片；ActionFailed 和其他结果不确定的失败不重发。"
+  },
+  "sticker_diagnostics_enabled": {
+    "description": "Sticker：临时脱敏诊断日志",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭。排查 Sticker E2E 时临时开启，记录工具可用/调用、装饰、发送状态和文字降级，不记录消息正文、身份、Prompt、图片路径或凭据。"
+  },
   "sticker_repeat_window": {
     "description": "Sticker：避免重复的最近图片数",
     "type": "int",

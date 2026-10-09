@@ -9,6 +9,7 @@
 - Group Identity Context v1 — VERIFIED：发送者名称优先使用群名片 card，回退 nickname；每群稳定 HMAC 身份、当前名称和最多 5 个 alias 持久化。identity_secret 与 group_identity.json 必须一起备份。上下文用 [显示名] 消息 标注，重名才加匿名短标签；ENGAGED 复用 member identity。用户 QQ E2E 已通过。
 - Jingjing Free Talk v1 — VERIFIED：IDLE 普通消息概率 0.35；direct / @ / Reply 明确回复；ENGAGED 连续对话 300 秒且无聊天 cooldown；安全限流为每用户 8/60 秒、每群 30/60 秒；最多三条 QQ 消息。用户 QQ E2E 已通过。
 - Jingjing Stickers v1 — VERIFIED：`jingjing_sticker(category)` 固定类别工具、本地安全图片目录、PNG/JPG/JPEG 运行时校验、SHA-256 内存重复抑制、单轮最多一图、文字先发/贴图后发及 image-only / failure fallback。用户 QQ E2E 已通过。
+- QQ Custom Sticker v1 — 核心路径 E2E PASS（已知限制单独记录）：默认 `sticker_send_mode=image` 保持普通图片模式；`qq_custom` 发送 OneBot image `sub_type=1`。最新用户手动 QQ E2E 确认普通文字、文字+自定义表情、纯表情、昵称唤醒及 image 模式兼容通过，客户端可收藏自定义表情。Ambiguous/NTEvent 超时不自动重发和每轮最多一张已由本地模拟测试验证；修复后尚未再次触发真实 NTEvent 超时。历史上的 `(图)` / `(表情已发出)`、工具调用后空 completion、Agent 错误后可能仍发送已选 Sticker，以及真实 AstrBot Stage 空链 guard 集成覆盖缺口仍保留；上下文体积与空 completion 的因果关系未确认。
 - Windows PowerShell 管理脚本、操作文档与纯逻辑测试
 
 下一阶段建议：Cloud Deployment v1。该阶段尚未开始，本轮没有进行部署迁移或云端配置。

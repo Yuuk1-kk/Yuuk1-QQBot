@@ -1,6 +1,6 @@
 # Progress
 
-Last updated: 2026-10-07
+Last updated: 2026-10-09
 
 ## v0.1 current state
 
@@ -123,3 +123,107 @@ At the first implementation snapshot, local tests and Runtime checks passed whil
 - Sticker selection/skip DEBUG diagnostics added during implementation were removed; only the content-free startup status and failure event/stage/exception-type warning remain. The plugin logger audit found no raw QQ/group IDs, message text, prompt/context, Provider ID, Persona content, sticker path/filename, API key, or token output.
 - Final closeout validation: `pytest` 78 passed; Ruff, Python `compileall`, all 10 PowerShell parses, schema JSON parse, `docker compose config --quiet`, `git diff --check`, and the secret-pattern scan (50 text files, zero matches) passed. `scripts/doctor.ps1` returned 0 failures and all checks PASS, including Yuuk1 Core plugin load, DeepSeek static configuration, NapCat QQ login/persistent data, and current OneBot connection.
 - The user-confirmed QQ E2E results and read-only doctor status are the runtime verification evidence for this closeout. No restart was needed for log/documentation/test-fixture cleanup; NapCat was not operated. No Persona, Provider, Web Search, Free Talk, or Group Identity behavior was changed.
+
+## Sticker QQ Custom Emoji Mode v1 — implementation checkpoint (historical; superseded below)
+
+This checkpoint predates the later user-confirmed QQ E2E. Its pending-E2E statements describe the state at that time only; see the latest Codex handoff at the end of this file.
+
+- Read-only source audit used the running pinned AstrBot v4.28.2 and NapCat v4.18.33 containers. AstrBot's built-in Image/Record serializer drops unknown fields, but the public generic `BaseMessageComponent.toDict()` path preserves subclass fields and the pinned aiocqhttp adapter serializes them as OneBot message data. NapCat v4.18.33 accepts `image.data.sub_type` and passes it to its picture element/protocol builder. No AstrBot Core or NapCat files were changed.
+- Added `sticker_send_mode`, default `image`, with opt-in `qq_custom` that emits the existing sticker bytes as a generic OneBot image segment with `sub_type=1`. `jingjing_sticker(category)`, image catalog validation, repeat suppression, one-image limit, text-first ordering, image-only delivery and ENGAGED flow are unchanged.
+- A pre-send preparation failure or explicit OneBot rejection can safely fall back to the regular Image segment. An ambiguous transport exception does not retry the image because OneBot/QQ may already have accepted it. Existing text is not cleared; image-only errors retain the existing short fallback text. Logs contain only fixed stage names and exception type, never image bytes, full paths, filenames or QQ/group identifiers.
+- Unit coverage now checks default/invalid mode normalization, generic component serialization of `image` + `sub_type=1`, custom image-only delivery, custom text-plus-sticker delivery, explicit-rejection fallback, and no retry after an ambiguous transport error.
+- Custom-mode client presentation has not been verified. Waiting for user QQ E2E on desktop/mobile display, preview/favorite behavior, text + sticker, image-only, and fallback. Do not describe the custom emoji style as VERIFIED until those checks pass.
+
+## Jingjing QQ Custom Sticker Mode v1 — failure investigation checkpoint (historical; current state below)
+
+This checkpoint records the initial silent-request report and the diagnostic setup before the later user E2E. Its configuration snapshot is historical; see the current selected settings and verification boundary at the end of this file.
+
+- The user reported that `stickers_enabled=true` + `sticker_send_mode=qq_custom` produced no visible sticker/reply to an @ message, while `image` mode worked. Read-only inspection of the live AstrBot plugin config found `stickers_enabled=true`, `sticker_send_mode=qq_custom`, and no diagnostics setting (therefore diagnostics remain off by default). No NapCat container or config was changed.
+- Read-only v4.28.2 source inspection confirmed `Context.send_message()` returns `True` after a matching platform's `send_by_session()` returns normally; it does not mean a QQ client rendered the media. The aiocqhttp adapter awaits its OneBot `send_group_msg` call and propagates errors. The mode is consulted only when an allowed sticker selection is attached to a result; plain text without a sticker selection does not enter the custom sender. For image-only sticker results, a normal API return clears the empty LLM result and bypasses AstrBot's later response hook. This is a plausible silent-response path if NapCat/QQ accepts the API call but the client does not display the custom image, but the reported incident's tool/send stages are absent from available logs, so the exact root cause is not confirmed.
+- AstrBot v4.28.2 source confirms the active request carries a `ToolSet` after Persona tools are merged (`tools=None` means all tools), and `MainAgentHooks` calls `OnUsingLLMToolEvent` before dispatch plus `OnLLMToolRespondEvent` after completion. The request hook can also inspect only whether `jingjing_sticker` is present. This distinguishes tool unavailable, LLM did not call it, selection handler entry, and returned tool status without recording tool arguments/results.
+- Added `sticker_diagnostics_enabled`, a default-off plugin setting for temporary INFO stage/status logs. When enabled it records request tool visibility, AstrBot tool selection, handler entry/result, reply decoration, configured/actual send mode, OneBot API completion/rejection/unknown, ordinary-image fallback, and image-only text fallback. Messages, QQ/group IDs, provider IDs, prompts, tool arguments/results, paths, filenames, image content, and credentials are excluded.
+- For the next user-triggered E2E, only the ignored AstrBot plugin config was updated to set `sticker_diagnostics_enabled=true`; the code/schema default remains false. Only `docker compose restart astrbot` was run. Startup logs show `Yuuk1 Sticker subsystem ready; assets=21; tool_available=True; send_mode=qq_custom; diagnostics=True`, `Yuuk1 Core ready`, and the OneBot v11 adapter connected. Plugin import failures and traceback blocks were both zero; the NapCat container ID was unchanged. No QQ test message was sent by this task.
+- The previous `qq_custom` incident remains undiagnosed because no tool-call or send-stage evidence was retained. If the new log reports `tool_not_called` with request visibility `available`, the model produced its answer without invoking the tool; if it reports a tool call, the following selection/decorate/send/fallback events identify the next boundary. The exact model-side reason is still unknown, and no custom-mode fix is claimed before the user E2E.
+
+## Codex handoff — 2026-10-09 (historical snapshot; superseded by final closeout below)
+
+This was the handoff snapshot at that time. Earlier sections retain historical implementation and debugging checkpoints; the final closeout section at the end of this file is now authoritative.
+
+### Git baseline
+
+- Branch: `main`.
+- HEAD: `8d7d51e9298b65e7394e4fce6986d514f6d982ad` (`feat: add jingjing sticker support`). The Free Talk v1 (`228a301c449cb8d17591c9c28cc0de0845566266`) and Group Identity Context v1 (`6692867c38408dd0204c1422cfbd38e3cc719724`) commits are ancestors in the current history; none of these SHAs were assumed to be HEAD without checking.
+- At the start of this handoff, 12 tracked files were modified and one sticker JPG was untracked. The exact file list is in `docs/CODEX_HANDOFF.md`. This handoff added/updated documentation only; it did not edit plugin or test code. `docs/CODEX_HANDOFF.md` is newly created and therefore also untracked until committed. Preserve every existing change.
+
+### QQ Custom Sticker v1 status
+
+- **E2E PASS — limited scope:** the user confirmed DeepSeek selected `jingjing_sticker`, the local asset was selected, QQ displayed the text and custom emoji correctly, the emoji could be favorited, and at least one image-only reply succeeded. Reported diagnostic markers were `tool_visibility=available`, `llm_selected=selected`, `selection=selected`, `sticker_queue=queued`, `onebot_send=api_completed`, and `reply_delivery=text_and_sticker_completed`.
+- `api_completed` means the OneBot send call returned normally. Client presentation is supported by the separate user visual confirmation, not by that API status.
+- **PENDING:** a one-off pure-image request also emitted `(图)`. A later request for the same target emitted only the image. The placeholder source has not been isolated to LLM output, plugin logic, AstrBot result decoration, or a fallback path. Do not globally filter `(图)`.
+- **PENDING:** an earlier `qq_custom` request to an @ message was silent. It was not reproduced in the later reported run, but the original event lacks tool/send-stage evidence and its root cause is unknown. Do not describe it as fixed.
+- **PENDING:** stable image-only behavior and a full regression with `sticker_diagnostics_enabled=false` have not had final acceptance.
+- No item is currently classified as BLOCKED.
+
+### Local runtime snapshot at that handoff (historical)
+
+- At that handoff, the ignored AstrBot plugin config at `data/astrbot/config/astrbot_plugin_yuuk1_core_config.json` contained `stickers_enabled=true`, `sticker_send_mode=qq_custom`, and `sticker_diagnostics_enabled=true`. The schema/code default for diagnostics remains `false`.
+- Read-only startup-log inspection confirmed `assets=21`, `tool_available=True`, `send_mode=qq_custom`, `diagnostics=True`, and `Yuuk1 Core ready`. `docker compose ps` showed AstrBot and NapCat running. The filtered log window contained startup markers but no later Sticker send-stage trace; live OneBot WebSocket state was not independently rechecked in this handoff. No new QQ E2E run is claimed from the current container session.
+- The current sticker tree contains 21 image assets. One JPG is untracked: `plugins/astrbot_plugin_yuuk1_core/assets/stickers/laugh/a251d04922e251c5439d2d6ad1ff4be1_720.jpg`.
+- This documentation handoff did not restart containers or change runtime configuration. The previous report says only AstrBot was restarted and NapCat was neither restarted nor modified.
+
+### Historical validation record
+
+The latest prior report supplied for this handoff records: pytest **79 passed**; Ruff, Python `compileall`, PowerShell script parsing, Compose config, schema JSON, and `git diff --check` passed; secret-pattern scan had 0 findings; `doctor.ps1` had 0 failures; 21 sticker assets were present. These are **historical results** and were not rerun in this handoff. Earlier snapshots in this file record 78 and smaller test counts; those are older checkpoints, not current results.
+
+Actual checks in this handoff were read-only Git/document/source/test inspection, selected runtime-config field inspection, container status inspection, filtered startup-log inspection, and a sticker asset count. No tests, Ruff, compileall, PowerShell parse, Compose validation, or secret scan were run.
+
+### Next task at that historical snapshot (superseded below)
+
+Investigate the image-only `(图)` placeholder. First trace whether it comes from LLM output, plugin code, AstrBot reply decoration, or fallback logic; inspect `reply_decoration` and send-hook timing; then add a targeted regression. Preserve normal text replies and ordinary `image` mode, never globally filter `(图)`, never retry an ambiguous send, and allow custom-to-image fallback only before a send or after a confirmed no-platform result. Keep diagnostics redacted. This was the next-session task at that historical snapshot and was not implemented in that checkpoint. Visual Identity v1 remains separate and out of scope.
+
+### Stop conditions
+
+Do not send production QQ messages automatically, scan QQ, change QQ/NapCat settings, restart containers, modify Persona/Provider or Sticker assets, discard worktree changes, commit, push, tag, or start Visual Identity v1. Ask for user involvement only if the next investigation actually requires missing real credentials, a QQ scan, irreversible external authorization, or resolution of a major architecture conflict. Mark externally unverified behavior `MANUAL VERIFICATION REQUIRED`.
+
+## Sticker Diagnostic Boundary v1 — implementation checkpoint (2026-10-09)
+
+- Added opt-in, content-free observations at the Agent-visible `on_llm_response` hook, Yuuk1 decoration entry, and completion of Yuuk1's own result decoration. Each boundary is correlated by an opaque 8-hex request marker; it records only mode, selection presence, component counts, booleans, and fixed stage/status values.
+- `(图)` detection is exact per Plain component after trimming outer whitespace. Plain components are not concatenated. The new instrumentation does not rewrite the result chain or alter the sticker send path. AstrBot's built-in post-hook decoration and final pre-send text remain unobservable through a reliable public plugin hook; `after_message_sent` runs after primary delivery.
+- Root cause of the observed `(图)` remains **UNKNOWN**. The earlier silent `qq_custom` @ request also remains unresolved. No automatic filter or fix was added.
+- At this implementation checkpoint, the running container had not yet loaded that local code update. This was a historical state only: later user-provided runtime logs confirmed the new decoration-boundary diagnostics appeared after the plugin was loaded. The current runtime configuration and loading status are recorded below.
+- Current validation for this code change: targeted registration test **1 passed**; requested three-file pytest set **30 passed**; Ruff **PASS**; in-memory Python syntax compilation **PASS**; `git diff --check` **PASS**. No QQ E2E was run.
+- Next step: after the user loads this plugin version in AstrBot, perform one controlled QQ request that selects a sticker and asks for image-only output; compare `llm_response_visible`, `yuuk1_decoration_entry`, and `yuuk1_decoration_complete` by request marker. Do not globally remove `(图)`.
+
+## QQ Custom Sticker v1 — final closeout (2026-10-09)
+
+This section supersedes older “pending E2E”, “diagnostics not loaded”, and runtime configuration snapshots above. It records user-confirmed E2E separately from local automated verification.
+
+### E2E verified by the latest user report
+
+- Ordinary text, text + QQ custom sticker, pure sticker, nickname wake, and ordinary `image`-mode compatibility all passed the latest manual QQ E2E.
+- The QQ client displayed the custom sticker correctly and confirmed it can be favorited. The latest normal send paths passed manual acceptance.
+- These are user-reported external checks; this closeout did not send QQ messages or rerun E2E.
+
+### Locally verified
+
+- Runtime configuration was read without exposing unrelated settings: `stickers_enabled=true`, `sticker_send_mode=qq_custom`, `sticker_diagnostics_enabled=false`.
+- AstrBot and NapCat were running. AstrBot startup logs confirmed `Yuuk1 Core ready`, `assets=21`, and `tool_available=True` in `qq_custom` mode with diagnostics disabled. A user-provided later log had already confirmed the decoration-boundary diagnostic records appeared at runtime; the prior “not loaded” note above describes only its earlier checkpoint.
+- The 21-image catalog includes the added JPEG in `assets/stickers/laugh/`; its extension, directory and JPEG decoding are valid.
+- All `ActionFailed` responses (including NTEvent acknowledgement timeouts) and other send exceptions are treated as ambiguous; they do not trigger another image attempt. The only runtime fallback boundaries are pre-send preparation failure and `Context.send_message()` confirming that no platform matched. Diagnostics remain redacted.
+- One selected material per turn is still enforced. Final local checks in this closeout: complete pytest **79 passed**, Ruff **PASS**, Python `compileall` **PASS**, schema JSON **PASS**, `git diff --check` **PASS**, secret-pattern scan **0 findings**. No real NTEvent timeout was re-triggered after the conservative fix.
+
+### Known limitations
+
+- Historical pure-sticker requests sometimes emitted `(图)` or `(表情已发出)`; the source remains unknown. Never globally filter either text.
+- DeepSeek has returned empty completions after a successful Sticker tool call. One prior request measured about 115,192 input tokens (about 114,944 cached); cause is unknown and the context size does not establish causality.
+- On an Agent error, an already-selected Sticker may still be sent. AstrBot v4.28.2 does not expose a reliable public Agent failure marker at the relevant decoration hook; this is not fixed here.
+- The true empty MessageChain path has not been tested through AstrBot's real `ResultDecorateStage` guard; existing tests do not close that integration gap.
+- The ambiguous-send fix is covered with local fake NapCat/OneBot outcomes, not a newly reproduced live timeout.
+
+### Deferred work and commit boundary
+
+- Sticker Completion Marker Protocol: deferred because Conversation persistence safety was not established.
+- Context / Memory optimization: separate later stage; no history or memory data was changed here.
+- Visual Identity v1: not started.
+- SnowLuma evaluation belongs to a future server deployment stage; server migration has not started.
+- The final Sticker closeout commit is the current HEAD after this documentation is committed; use `git log -1 --oneline` for its exact identifier. No push is authorized.
