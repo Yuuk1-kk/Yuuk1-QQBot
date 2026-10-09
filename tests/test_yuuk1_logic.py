@@ -5,11 +5,14 @@ import unittest
 from plugins.astrbot_plugin_yuuk1_core.logic import (
     SlidingWindowRateLimiter,
     TwoLevelRateLimiter,
+    classify_owner_identity,
     is_configured_admin,
+    is_configured_owner,
     is_group_allowed,
     is_qq_context_allowed,
     normalize_config,
     normalize_ids,
+    normalize_owner_id,
 )
 
 
@@ -44,12 +47,59 @@ class AccessPolicyTests(unittest.TestCase):
         self.assertFalse(is_configured_admin("54321", frozenset({"12345"})))
 
 
+class OwnerIdentityTests(unittest.TestCase):
+    def test_owner_requires_trusted_qq_platform_and_matching_sender_id(self) -> None:
+        self.assertTrue(is_configured_owner("aiocqhttp", "900000001", "900000001"))
+        self.assertTrue(is_configured_owner("aiocqhttp", 900000001, "900000001"))
+        self.assertFalse(is_configured_owner("aiocqhttp", "900000002", "900000001"))
+        self.assertFalse(is_configured_owner("webchat", "900000001", "900000001"))
+
+    def test_owner_config_is_a_decimal_string_and_empty_disables_identity(self) -> None:
+        self.assertEqual(normalize_owner_id(" 900000001 "), "900000001")
+        self.assertEqual(normalize_owner_id(900000001), "")
+        self.assertEqual(normalize_owner_id(""), "")
+        self.assertEqual(normalize_owner_id("name"), "")
+        self.assertEqual(normalize_owner_id("９０００００００１"), "")
+        self.assertFalse(is_configured_owner("aiocqhttp", "900000001", ""))
+
+    def test_owner_identity_states_fail_closed(self) -> None:
+        self.assertEqual(
+            classify_owner_identity("aiocqhttp", "900000001", "900000001"),
+            "verified_owner",
+        )
+        self.assertEqual(
+            classify_owner_identity("aiocqhttp", "900000002", "900000001"),
+            "verified_non_owner",
+        )
+        self.assertEqual(
+            classify_owner_identity("aiocqhttp", "900000002", ""),
+            "unconfigured",
+        )
+        self.assertEqual(
+            classify_owner_identity("webchat", "900000001", "900000001"),
+            "unavailable",
+        )
+        self.assertEqual(
+            classify_owner_identity("aiocqhttp", "not-an-id", "900000001"),
+            "unavailable",
+        )
+
+    def test_owner_binding_does_not_change_admin_authorization(self) -> None:
+        settings = normalize_config(
+            {"owner_qq_id": "900000001", "admin_users": ["900000002"]}
+        )
+        self.assertEqual(settings.owner_qq_id, "900000001")
+        self.assertFalse(is_configured_admin("900000001", settings.admin_users))
+        self.assertTrue(is_configured_admin("900000002", settings.admin_users))
+
+
 class ConfigNormalizationTests(unittest.TestCase):
     def test_defaults_are_safe_and_usable(self) -> None:
         settings = normalize_config({})
         self.assertEqual(settings.bot_name, "鲸鲸")
         self.assertEqual(settings.allowed_groups, frozenset())
         self.assertFalse(settings.allow_private_chat)
+        self.assertEqual(settings.owner_qq_id, "")
         self.assertTrue(settings.rate_limit_enabled)
         self.assertEqual(settings.rate_limit_window, 60)
         self.assertEqual(settings.rate_limit_requests, 30)
@@ -71,6 +121,7 @@ class ConfigNormalizationTests(unittest.TestCase):
         self.assertFalse(settings.stickers_enabled)
         self.assertEqual(settings.sticker_send_mode, "image")
         self.assertFalse(settings.sticker_diagnostics_enabled)
+        self.assertFalse(settings.owner_identity_diagnostics_enabled)
         self.assertEqual(settings.sticker_repeat_window, 4)
         self.assertFalse(settings.idle_speak_enabled)
         self.assertEqual(settings.idle_threshold_seconds, 1800)
@@ -99,6 +150,7 @@ class ConfigNormalizationTests(unittest.TestCase):
                 "stickers_enabled": "yes",
                 "sticker_send_mode": "qq_custom",
                 "sticker_diagnostics_enabled": "true",
+                "owner_identity_diagnostics_enabled": "true",
                 "sticker_repeat_window": 100,
                 "idle_speak_enabled": True,
                 "idle_threshold_seconds": 999_999,
@@ -125,6 +177,7 @@ class ConfigNormalizationTests(unittest.TestCase):
         self.assertTrue(settings.stickers_enabled)
         self.assertEqual(settings.sticker_send_mode, "qq_custom")
         self.assertTrue(settings.sticker_diagnostics_enabled)
+        self.assertTrue(settings.owner_identity_diagnostics_enabled)
         self.assertEqual(settings.sticker_repeat_window, 5)
         self.assertTrue(settings.idle_speak_enabled)
         self.assertEqual(settings.idle_threshold_seconds, 604_800)

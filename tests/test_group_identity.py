@@ -22,6 +22,10 @@ def test_identity_secret_is_not_exposed_in_webui_schema() -> None:
     assert "identity_secret" not in schema
     assert "group_identity_enabled" in schema
     assert "group_identity_persistence_enabled" in schema
+    assert schema["owner_qq_id"]["type"] == "string"
+    assert schema["owner_qq_id"]["default"] == ""
+    assert schema["owner_identity_diagnostics_enabled"]["type"] == "bool"
+    assert schema["owner_identity_diagnostics_enabled"]["default"] is False
 
 
 def test_identity_scope_and_member_keys_are_stable_and_group_scoped(tmp_path: Path) -> None:

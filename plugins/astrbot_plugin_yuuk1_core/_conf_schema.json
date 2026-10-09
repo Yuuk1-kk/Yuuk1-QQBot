@@ -23,6 +23,12 @@
     "default": [],
     "hint": "仅这些用户可以运行 /yuuk1 status 和 /yuuk1 reset。"
   },
+  "owner_qq_id": {
+    "description": "鲸鲸主人身份绑定 QQ 号",
+    "type": "string",
+    "default": "",
+    "hint": "仅用于可信 QQ 平台的当前发言者身份上下文，不授予管理权限；留空时不识别 Owner。"
+  },
   "system_prompt": {
     "description": "Bot 人格补充提示词",
     "type": "text",
@@ -177,6 +183,12 @@
     "type": "bool",
     "default": false,
     "hint": "默认关闭。排查 Sticker E2E 时临时开启，记录工具可用/调用、装饰、发送状态和文字降级，不记录消息正文、身份、Prompt、图片路径或凭据。"
+  },
+  "owner_identity_diagnostics_enabled": {
+    "description": "Owner 身份：临时脱敏诊断日志",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭。仅记录请求级可信平台匹配、Owner 配置/匹配及身份规则注入状态，不记录 QQ 号、群号、昵称、消息、Prompt 或凭据。"
   },
   "sticker_repeat_window": {
     "description": "Sticker：避免重复的最近图片数",

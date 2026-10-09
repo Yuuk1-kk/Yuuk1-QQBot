@@ -59,10 +59,12 @@ notepad .env
 
 - 锁定的 Docker 镜像、端口、时区、`DEEPSEEK_API_KEY`：仓库根目录 `.env`；升级流程见 [UPSTREAM](docs/UPSTREAM.md)
 - AstrBot OneBot Adapter / Provider / Profile：AstrBot WebUI
-- 群白名单、私聊开关、管理员、人格、限流、群身份上下文：AstrBot WebUI → 插件 → Yuuk1 Core 配置
+- 群白名单、私聊开关、管理员、Owner 身份、人格、限流、群身份上下文：AstrBot WebUI → 插件 → Yuuk1 Core 配置
 - NapCat 登录与 transport 配置：NapCat WebUI；Reverse WebSocket 地址由官方 `MODE=astrbot` 模板设为 `ws://astrbot:6199/ws`
 
 `allowed_groups` 为空时所有群默认静默；`allow_private_chat=false` 时 QQ 私聊默认禁用。群聊/私聊允许后，同一 QQ 用户默认每 60 秒最多 8 次模型请求，每个群默认每 60 秒最多 30 次；两级限流只在进程内保存。该限流保护服务免受刷屏和异常循环影响，正常 3–5 轮连续对话不会触顶。`/yuuk1 reset` 与 `/yuuk1 status` 仅对 `admin_users` 生效。
+
+`owner_qq_id` 是鲸鲸的关系身份绑定，默认空；只按可信 QQ 平台当前事件的 sender ID 与该字符串匹配。Owner 身份不等于 `admin_users`，不会增加任何管理、系统或工具权限。要启用时，在 AstrBot WebUI 的“插件 → Yuuk1 Core 配置”中填写 Owner 的 QQ 号字符串并保存；本仓库不保存该运行值。
 
 ## 管理脚本
 
@@ -120,6 +122,12 @@ python -m ruff check plugins scripts tests
 - data/astrbot/config/astrbot_plugin_yuuk1_core_config.json（实际 WebUI 插件配置）
 
 identity_secret 是随机 32 字节密钥，第一次启动时创建，AstrBot restart/recreate 后保持不变。JSON store 通过同目录临时文件、fsync 和原子替换批量写入；名称变更最多保留 5 个去重 alias，每群最多记录 500 名成员。若 store 已存在而 secret 丢失，插件不会自动生成替代 secret 或覆盖旧 store，doctor 会报告身份持久化故障。
+
+### Owner Identity v1 + Relationship Memory Store Foundation
+
+Owner Identity v1 的确定性身份问答已部署，用户确认真实 QQ E2E 全部通过。对直接面向鲸鲸的明确第一人称身份问句，插件按可信平台、当前 sender ID 和 `owner_qq_id` 分类并直接回复，在 Provider 选择前停止本轮 Agent；歧义、引用、转述、转发和长文本继续原流程。该保证限于被白名单规则识别的身份问答，不代表一般自由聊天永不发生身份误归属。昵称、自称、@、引用和共享历史不参与 Owner 认证；不注入原始 QQ 号、不修改全局 Persona 或管理员授权。`owner_identity_diagnostics_enabled` 默认值及当前运行值均为 `false`。
+
+Relationship Memory Store Foundation 使用 Python 标准库 SQLite，默认路径为 `data/astrbot/plugin_data/astrbot_plugin_yuuk1_core/relationship_memory.sqlite3`。记录按现有 HMAC `group_key` 与 `subject_member_key` 双重限定，当前仅提供插件内部 CRUD；没有 LLM 工具、聊天命令、自动抽取、记忆检索或 DeepSeek 注入。数据库没有静态加密。未来迁移时需在停机一致性备份中同时保留该数据库、`identity_secret`、`group_identity.json` 与插件配置；现有 `scripts/backup.ps1` 会归档 AstrBot data，但本轮未执行备份或迁移。
 
 未来迁移到 Linux Docker 时，应一起复制上述 identity secret、identity store 与插件配置，并保持 AstrBot data 目录由持久卷承载。现有停机一致性备份归档 data/astrbot，因此会包含这三项；不要把这些运行数据放入 Git。代码、本地回归、AstrBot Runtime 和用户确认的真实 QQ 群 E2E 均已通过；Group Identity Context v1 已正式 VERIFIED。
 

@@ -62,6 +62,48 @@ def is_configured_admin(user_id: object, admin_users: frozenset[str]) -> bool:
     return bool(normalized_user_id and normalized_user_id in admin_users)
 
 
+def normalize_owner_id(value: object) -> str:
+    """Accept only a configured decimal string; never coerce it through int."""
+    if not isinstance(value, str):
+        return ""
+    normalized = value.strip()
+    return normalized if normalized.isascii() and normalized.isdigit() else ""
+
+
+def is_configured_owner(
+    platform_name: object,
+    sender_id: object,
+    owner_qq_id: object,
+) -> bool:
+    """Identify the configured Owner only from the trusted QQ sender field."""
+    return classify_owner_identity(platform_name, sender_id, owner_qq_id) == "verified_owner"
+
+
+def classify_owner_identity(
+    platform_name: object,
+    sender_id: object,
+    owner_qq_id: object,
+) -> str:
+    """Return a request identity state using only trusted platform/sender fields.
+
+    The returned state is deliberately independent of display names, message
+    text, mentions, replies, conversation history, and model output.
+    """
+    if platform_name != "aiocqhttp":
+        return "unavailable"
+
+    actual_sender_id = str(sender_id or "").strip()
+    if not actual_sender_id.isascii() or not actual_sender_id.isdigit():
+        return "unavailable"
+
+    configured_owner_id = normalize_owner_id(owner_qq_id)
+    if not configured_owner_id:
+        return "unconfigured"
+    if actual_sender_id == configured_owner_id:
+        return "verified_owner"
+    return "verified_non_owner"
+
+
 def _positive_int(value: object, default: int, maximum: int) -> int:
     if isinstance(value, bool):
         return default
@@ -124,6 +166,7 @@ class CoreSettings:
     allowed_groups: frozenset[str]
     allow_private_chat: bool
     admin_users: frozenset[str]
+    owner_qq_id: str
     system_prompt: str
     group_identity_enabled: bool
     group_identity_persistence_enabled: bool
@@ -150,6 +193,7 @@ class CoreSettings:
     stickers_enabled: bool
     sticker_send_mode: str
     sticker_diagnostics_enabled: bool
+    owner_identity_diagnostics_enabled: bool
     sticker_repeat_window: int
     idle_speak_enabled: bool
     idle_threshold_seconds: int
@@ -179,6 +223,7 @@ def normalize_config(config: Mapping[str, object] | None) -> CoreSettings:
         allowed_groups=normalize_ids(values.get("allowed_groups", [])),
         allow_private_chat=_bool_value(values.get("allow_private_chat", False), False),
         admin_users=normalize_ids(values.get("admin_users", [])),
+        owner_qq_id=normalize_owner_id(values.get("owner_qq_id", "")),
         system_prompt=system_prompt,
         group_identity_enabled=_bool_value(
             values.get("group_identity_enabled", True), True
@@ -244,6 +289,9 @@ def normalize_config(config: Mapping[str, object] | None) -> CoreSettings:
         sticker_send_mode=sticker_send_mode,
         sticker_diagnostics_enabled=_bool_value(
             values.get("sticker_diagnostics_enabled", False), False
+        ),
+        owner_identity_diagnostics_enabled=_bool_value(
+            values.get("owner_identity_diagnostics_enabled", False), False
         ),
         sticker_repeat_window=_positive_int(
             values.get("sticker_repeat_window", 4), 4, 5

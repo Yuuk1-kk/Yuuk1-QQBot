@@ -14,9 +14,12 @@
 
 下一阶段建议：Cloud Deployment v1。该阶段尚未开始，本轮没有进行部署迁移或云端配置。
 
-## v0.2：更自然的群聊体验（尚未开始）
+## v0.2：更自然的群聊体验（未整体启动）
 
 Group Identity Context v1 是当前 v0.1 stabilization 范围内的身份/名称上下文，不是跨用户画像或长期个人记忆。
+
+- Owner Identity v1 — VERIFIED（确定性身份问答 QQ E2E）：用户确认部署后完整真实 QQ E2E 全部通过。明确且直接面向鲸鲸的身份问答由当前可信 QQ sender ID 分类决定答复，避免 LLM 自行判断主人身份；未命中的自由聊天继续走原模型流程。昵称、自称、@、引用和共享历史不参与认证；不注入原始 QQ 号，不修改全局 Persona 或管理员权限。Owner 诊断默认关闭，当前运行配置已为 false。此验收保证范围限于规则识别到的明确身份问答。
+- Relationship Memory Store Foundation — IMPLEMENTED / LOCALLY VERIFIED：使用标准库 SQLite 存放由 Group Identity HMAC 键限定的事实记录，支持事务 CRUD、版本替换和清除正文的删除。完整 Relationship Memory v1 尚未完成；Memory Injection 与 Controlled Memory Writing 均未开始。
 
 - 主动参与概率
 - 对引用/回复关系的更自然理解
