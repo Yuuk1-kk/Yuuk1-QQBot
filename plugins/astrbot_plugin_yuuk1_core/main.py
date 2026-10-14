@@ -9,7 +9,7 @@ import os
 import random
 import tempfile
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -24,8 +24,14 @@ from astrbot.api.message_components import (
 )
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, StarTools
+from astrbot.core import sp
 from astrbot.core.agent.message import TextPart
 
+from .conversation_management import (
+    create_scoped_conversation,
+    page_scoped_conversations,
+    switch_scoped_conversation,
+)
 from .group_chat import (
     GroupContextBuffer,
     contains_flattened_at_id,
@@ -175,6 +181,34 @@ def _message_kind(event: AstrMessageEvent) -> str:
     return "other"
 
 
+def _is_allowed_qq_group_session(
+    event: AstrMessageEvent, allowed_groups: frozenset[str]
+) -> bool:
+    """Bind an event UMO to its trusted QQ group (or isolated group sender)."""
+    try:
+        group_id = str(event.get_group_id() or "")
+        platform_id = str(event.get_platform_id() or "")
+        if (
+            event.get_platform_name() != "aiocqhttp"
+            or not group_id
+            or not platform_id
+            or event.is_private_chat()
+            or not is_group_allowed(group_id, allowed_groups)
+        ):
+            return False
+        session_id = group_id
+        if event.get_extra("_session_isolated", False):
+            sender_id = str(event.get_sender_id() or "")
+            if not sender_id:
+                return False
+            session_id = f"{sender_id}_{group_id}"
+        return event.unified_msg_origin == (
+            f"{platform_id}:GroupMessage:{session_id}"
+        )
+    except Exception:
+        return False
+
+
 class Yuuk1CommandAllowlistFilter(filter.CustomFilter):
     """Apply the configured group gate before AstrBot expands an empty command group."""
 
@@ -187,6 +221,40 @@ class Yuuk1CommandAllowlistFilter(filter.CustomFilter):
             _ACTIVE_SETTINGS.allowed_groups,
             _ACTIVE_SETTINGS.allow_private_chat,
         )
+
+
+class Yuuk1ConversationCommandFilter(filter.CustomFilter):
+    """Route /jjctx commands and report denials through AstrBot's filter path."""
+
+    def filter(self, event: AstrMessageEvent, cfg: AstrBotConfig) -> bool:
+        del cfg
+        # WakingCheck evaluates additional registered handlers after a filter
+        # exception. Do not emit the same denial again after it stopped the event.
+        try:
+            if event.is_stopped():
+                return False
+        except Exception:
+            return False
+        # WakingCheck has already removed the wake prefix before filters run.
+        # Keep the command family separate from unrelated wake messages.
+        message = " ".join(str(getattr(event, "message_str", "")).split())
+        if message != "jjctx" and not message.startswith("jjctx "):
+            return False
+        try:
+            settings = _ACTIVE_SETTINGS
+            allowed = bool(
+                settings is not None
+                and _is_allowed_qq_group_session(event, settings.allowed_groups)
+                and is_configured_admin(event.get_sender_id(), settings.admin_users)
+            )
+        except Exception:
+            allowed = False
+        if not allowed:
+            # AstrBot v4.28.2 catches handler-filter exceptions in WakingCheck,
+            # sends this safe text, and stops the event before Agent fallback.
+            # The command handlers repeat this authorization before data access.
+            raise ValueError("此命令仅限允许的 QQ 群内授权管理员使用。")
+        return True
 
 
 class Yuuk1GroupFeatureFilter(filter.CustomFilter):
@@ -223,6 +291,7 @@ class Yuuk1CorePlugin(Star):
         super().__init__(context)
         self.settings: CoreSettings = normalize_config(config)
         _ACTIVE_SETTINGS = self.settings
+        self._conversation_switch_lock = asyncio.Lock()
         self.rate_limiter = TwoLevelRateLimiter(
             self.settings.user_rate_limit_window,
             self.settings.user_rate_limit_requests,
@@ -398,6 +467,62 @@ class Yuuk1CorePlugin(Star):
 
     def _is_admin(self, event: AstrMessageEvent) -> bool:
         return is_configured_admin(event.get_sender_id(), self.settings.admin_users)
+
+    def _conversation_management_context(self, event: AstrMessageEvent) -> bool:
+        """Fail closed unless the trusted QQ event identifies an allowed group."""
+        return _is_allowed_qq_group_session(event, self.settings.allowed_groups)
+
+    def _can_manage_conversations(self, event: AstrMessageEvent) -> bool:
+        """Require the configured project admin in an allowed QQ group."""
+        if not self._conversation_management_context(event):
+            return False
+        try:
+            return self._is_admin(event)
+        except Exception:
+            return False
+
+    @staticmethod
+    def _other_conversation_work_active(event: AstrMessageEvent) -> bool | None:
+        """Conservatively inspect the pinned runtime's active event snapshot."""
+        try:
+            from astrbot.core.utils.active_event_registry import active_event_registry
+
+            active_events = active_event_registry._events  # noqa: SLF001
+            if not isinstance(active_events, dict):
+                return None
+            return any(
+                active is not event
+                for active in tuple(active_events.get(event.unified_msg_origin, ()))
+            )
+        except Exception:
+            return None
+
+    @staticmethod
+    def _conversation_created_label(conversation: Any) -> str:
+        try:
+            created = int(conversation.created_at)
+            return datetime.fromtimestamp(created, timezone.utc).strftime(
+                "%Y-%m-%d %H:%M UTC"
+            )
+        except (AttributeError, OverflowError, TypeError, ValueError):
+            return "未知"
+
+    async def _selected_persona_label(
+        self, event: AstrMessageEvent, conversation: Any
+    ) -> str:
+        """Use AstrBot's own request Persona resolver, not a guessed binding."""
+        try:
+            _, persona, _, _ = await self.context.persona_manager.resolve_selected_persona(
+                umo=event.unified_msg_origin,
+                conversation_persona_id=getattr(conversation, "persona_id", None),
+                platform_name=event.get_platform_name(),
+                provider_settings=self.context.get_config(event.unified_msg_origin),
+            )
+            if isinstance(persona, dict) and isinstance(persona.get("name"), str):
+                return persona["name"].replace("\r", " ").replace("\n", " ")[:60]
+        except Exception:
+            pass
+        return "未能可靠解析"
 
     def _is_owner(self, event: AstrMessageEvent) -> bool:
         return is_configured_owner(
@@ -2100,6 +2225,185 @@ class Yuuk1CorePlugin(Star):
             logger.warning("Yuuk1 Idle Presence could not send a message.")
             return False
 
+    @filter.custom_filter(Yuuk1ConversationCommandFilter)
+    @filter.command_group("jjctx")
+    def jjctx(self) -> None:
+        """Manage this allowed QQ group's AstrBot Conversations."""
+        pass
+
+    @jjctx.command("new")
+    @filter.custom_filter(Yuuk1ConversationCommandFilter)
+    @filter.permission_type(filter.PermissionType.MEMBER, raise_error=False)
+    async def jjctx_new(self, event: AstrMessageEvent):
+        """Create a new Conversation while retaining the group's old history."""
+        if not self._can_manage_conversations(event):
+            yield event.plain_result("此命令仅限允许的 QQ 群内授权管理员使用。")
+            return
+
+        async def read_persisted(umo: str) -> str | None:
+            preferences = await sp.range_get_async("umo", umo, "sel_conv_id")
+            if len(preferences) != 1:
+                return None
+            preference = preferences[0]
+            if (
+                preference.scope != "umo"
+                or preference.scope_id != umo
+                or preference.key != "sel_conv_id"
+                or not isinstance(preference.value, dict)
+            ):
+                return None
+            value = preference.value.get("val")
+            return value if isinstance(value, str) else None
+
+        async with self._conversation_switch_lock:
+            result = await create_scoped_conversation(
+                self.context.conversation_manager,
+                read_persisted,
+                lambda: self._other_conversation_work_active(event),
+                event.unified_msg_origin,
+                event.get_platform_id(),
+            )
+        responses = {
+            "created": (
+                "已创建并选中新的 Conversation；旧历史仍保留。\n"
+                f"新 ID：{result.conversation_id}"
+            ),
+            "busy": "当前群仍有处理中任务，或无法确认空闲；请稍后重试。",
+            "state_mismatch": "当前选择与本群记录或持久化状态不一致，已停止创建。",
+            "changed": "当前选择在操作期间变化，未完成本次创建；请用 current 和 list 核验。",
+            "failed_uncertain": (
+                "创建结果无法确认；请勿重复创建，先用 current 和 list 核验。"
+            ),
+        }
+        yield event.plain_result(responses[result.status])
+
+    @jjctx.command("current")
+    @filter.custom_filter(Yuuk1ConversationCommandFilter)
+    @filter.permission_type(filter.PermissionType.MEMBER, raise_error=False)
+    async def jjctx_current(self, event: AstrMessageEvent):
+        """Show the selected Conversation in this allowed QQ group."""
+        if not self._can_manage_conversations(event):
+            yield event.plain_result("此命令仅限允许的 QQ 群内授权管理员使用。")
+            return
+        manager = self.context.conversation_manager
+        umo = event.unified_msg_origin
+        try:
+            current_id = await manager.get_curr_conversation_id(umo)
+            conversations = await manager.get_conversations(umo)
+        except Exception:
+            yield event.plain_result("读取 Conversation 失败，请稍后重试。")
+            return
+        if not current_id:
+            yield event.plain_result("当前群尚无选中的 Conversation。")
+            return
+        current = next(
+            (
+                conversation
+                for conversation in conversations
+                if conversation.user_id == umo and conversation.cid == current_id
+            ),
+            None,
+        )
+        if current is None:
+            yield event.plain_result("当前 Conversation 指针与本群记录不一致，请暂停切换。")
+            return
+        persona_label = await self._selected_persona_label(event, current)
+        yield event.plain_result(
+            "当前群 Conversation（已选中）：\n"
+            f"短 ID：{current_id[:8]}\n"
+            f"完整 ID：{current_id}\n"
+            f"创建：{self._conversation_created_label(current)}\n"
+            f"Persona：{persona_label}"
+        )
+
+    @jjctx.command("list")
+    @filter.custom_filter(Yuuk1ConversationCommandFilter)
+    @filter.permission_type(filter.PermissionType.MEMBER, raise_error=False)
+    async def jjctx_list(self, event: AstrMessageEvent, page: str = "1"):
+        """List this QQ group's saved Conversations, five per page."""
+        if not self._can_manage_conversations(event):
+            yield event.plain_result("此命令仅限允许的 QQ 群内授权管理员使用。")
+            return
+        if not page.isascii() or not page.isdecimal() or len(page) > 5:
+            yield event.plain_result("页码必须是正整数。")
+            return
+        page_number = int(page)
+        if page_number < 1:
+            yield event.plain_result("页码必须是正整数。")
+            return
+        manager = self.context.conversation_manager
+        umo = event.unified_msg_origin
+        try:
+            current_id = await manager.get_curr_conversation_id(umo)
+            conversations = await manager.get_conversations(umo)
+        except Exception:
+            yield event.plain_result("读取 Conversation 列表失败，请稍后重试。")
+            return
+        entries, total_pages = page_scoped_conversations(
+            conversations, umo, page_number
+        )
+        if page_number > total_pages:
+            yield event.plain_result(f"页码超出范围，共 {total_pages} 页。")
+            return
+        if not entries:
+            yield event.plain_result("当前群暂无保留的 Conversation。")
+            return
+        lines = [f"本群 Conversation：第 {page_number}/{total_pages} 页"]
+        for conversation in entries:
+            marker = " [当前]" if conversation.cid == current_id else ""
+            lines.append(
+                f"{conversation.cid[:8]}{marker} · "
+                f"{self._conversation_created_label(conversation)}\n"
+                f"  {conversation.cid}"
+            )
+        yield event.plain_result("\n".join(lines))
+
+    @jjctx.command("switch")
+    @filter.custom_filter(Yuuk1ConversationCommandFilter)
+    @filter.permission_type(filter.PermissionType.MEMBER, raise_error=False)
+    async def jjctx_switch(self, event: AstrMessageEvent, conversation_id: str):
+        """Switch to an owned Conversation by full ID or unique short prefix."""
+        if not self._can_manage_conversations(event):
+            yield event.plain_result("此命令仅限允许的 QQ 群内授权管理员使用。")
+            return
+
+        async def read_persisted(umo: str) -> str | None:
+            preferences = await sp.range_get_async("umo", umo, "sel_conv_id")
+            if len(preferences) != 1:
+                return None
+            preference = preferences[0]
+            if (
+                preference.scope != "umo"
+                or preference.scope_id != umo
+                or preference.key != "sel_conv_id"
+                or not isinstance(preference.value, dict)
+            ):
+                return None
+            value = preference.value.get("val")
+            return value if isinstance(value, str) else None
+
+        async with self._conversation_switch_lock:
+            result = await switch_scoped_conversation(
+                self.context.conversation_manager,
+                read_persisted,
+                lambda: self._other_conversation_work_active(event),
+                event.unified_msg_origin,
+                conversation_id,
+            )
+        responses = {
+            "switched": "Conversation 已切换，当前选择和持久化记录均已核验。旧历史仍保留。",
+            "unchanged": "当前已经选中这个 Conversation，未重复写入。",
+            "invalid": "Conversation ID 格式无效；请使用完整 ID 或至少 8 位的十六进制短 ID。",
+            "not_found": "当前群没有这个 Conversation，未切换。",
+            "ambiguous": "短 ID 匹配多条 Conversation；请使用完整 ID。",
+            "busy": "当前群仍有处理中的任务，或无法确认空闲；请稍后重试。",
+            "state_mismatch": "当前选择与本群记录或持久化状态不一致，已停止切换。",
+            "changed": "当前选择在操作期间变化，未执行本次切换；请重新查看。",
+            "failed_rolled_back": "切换未完成；已核验仍指向原 Conversation。",
+            "failed_uncertain": "切换结果无法确认；请暂停操作并检查当前 Conversation。",
+        }
+        yield event.plain_result(responses[result.status])
+
     @filter.custom_filter(Yuuk1CommandAllowlistFilter)
     @filter.command_group("yuuk1")
     def yuuk1(self) -> None:
@@ -2116,7 +2420,8 @@ class Yuuk1CorePlugin(Star):
             "Yuuk1-QQBot 命令：\n"
             "/yuuk1 help - 显示帮助\n"
             "/yuuk1 status - 查看运行状态（管理员）\n"
-            "/yuuk1 reset - 清理当前会话上下文（管理员）"
+            "/yuuk1 reset - 清理当前会话上下文（管理员）\n"
+            "/jjctx new|current|list|switch - 管理本群 Conversation（授权管理员）"
         )
 
     @yuuk1.command("status")

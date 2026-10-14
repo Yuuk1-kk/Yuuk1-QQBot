@@ -28,6 +28,8 @@ The plugin uses `on_waiting_llm_request` to apply QQ context access and two-leve
 
 Project commands use the `yuuk1` command group. The QQ command group and LLM hooks deny all groups until `allowed_groups` is populated and deny private chats unless `allow_private_chat` is explicitly enabled. `/yuuk1 status` and `/yuuk1 reset` require a configured project admin. Conversation reset calls AstrBot's ConversationManager API for the current unified message origin. Status only reports whether a provider is loaded; it does not send a paid probe request or print credentials. The default in-memory limits are 3 requests per QQ user and 15 per group per 60 seconds, with the user quota shared across groups and private chats. Denied requests do not consume the other quota.
 
+The `/jjctx` Conversation commands use a narrower project gate: a trusted OneBot QQ event must resolve to an allowlisted group, and its current sender ID must exactly match `admin_users`. AstrBot global administrator status, display names, and Owner identity do not grant this command access. `/jjctx new` and `/jjctx switch` use AstrBot's ConversationManager and refuse observed active work; because AstrBot has no atomic event-registration lock for pointer changes, they should be used during a quiet group window.
+
 ## Config and Secret Flow
 
 - Compose interpolates `.env` variables; `.env` is untracked and ignored.

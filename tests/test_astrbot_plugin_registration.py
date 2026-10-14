@@ -29,6 +29,7 @@ from plugins.astrbot_plugin_yuuk1_core.group_chat import GroupMessage
 from plugins.astrbot_plugin_yuuk1_core.stickers import StickerCatalog
 
 _REGISTERED_DIRECT_FILTERS: list[tuple[object, object]] = []
+_REGISTERED_PERMISSIONS: list[tuple[object, object]] = []
 
 
 class _TextPart:
@@ -161,6 +162,14 @@ def _register_hook():
     return decorator
 
 
+def _register_permission_type(permission_type, **_kwargs):
+    def decorator(handler):
+        _REGISTERED_PERMISSIONS.append((handler, permission_type))
+        return handler
+
+    return decorator
+
+
 class _Star:
     def __init__(self, context: object) -> None:
         self.context = context
@@ -195,6 +204,7 @@ class AstrBotPluginRegistrationTests(unittest.TestCase):
         registered_tools: list[tuple[str | None, object]] = []
         log_records: list[tuple[str, str]] = []
         _REGISTERED_DIRECT_FILTERS.clear()
+        _REGISTERED_PERMISSIONS.clear()
 
         def _capture_log(level):
             def write(message, *args, **_kwargs):
@@ -218,6 +228,10 @@ class AstrBotPluginRegistrationTests(unittest.TestCase):
             return decorator
 
         api.AstrBotConfig = dict
+        async def _range_get_async(_scope, _umo, _key):
+            return []
+
+        core.sp = SimpleNamespace(range_get_async=_range_get_async)
         api.logger = types.SimpleNamespace(
             debug=_capture_log("debug"),
             error=_capture_log("error"),
@@ -227,10 +241,15 @@ class AstrBotPluginRegistrationTests(unittest.TestCase):
         event.AstrMessageEvent = object
         event.MessageChain = list
         event_type = SimpleNamespace(GROUP_MESSAGE=object())
+        permission_type = SimpleNamespace(
+            MEMBER=object(), SHARED_GROUP_ADMIN=object()
+        )
         event.filter = types.SimpleNamespace(
             CustomFilter=_CustomFilter,
             EventMessageType=event_type,
+            PermissionType=permission_type,
             command_group=_register_command_group,
+            permission_type=_register_permission_type,
             custom_filter=_register_custom_filter,
             event_message_type=_register_event_message_type,
             llm_tool=_register_llm_tool,
@@ -289,6 +308,33 @@ class AstrBotPluginRegistrationTests(unittest.TestCase):
         self.assertIsInstance(command_group, _RegisteringCommandable)
         self.assertEqual(command_group.group_name, "yuuk1")
         self.assertEqual(set(command_group.commands), {"help", "status", "reset"})
+        conversation_group = plugin.Yuuk1CorePlugin.jjctx
+        self.assertIsInstance(conversation_group, _RegisteringCommandable)
+        self.assertEqual(conversation_group.group_name, "jjctx")
+        self.assertEqual(
+            set(conversation_group.commands), {"new", "current", "list", "switch"}
+        )
+        self.assertEqual(len(conversation_group.custom_filters), 1)
+        self.assertIsInstance(
+            conversation_group.custom_filters[0],
+            plugin.Yuuk1ConversationCommandFilter,
+        )
+        self.assertEqual(
+            {
+                handler.__name__
+                for handler, custom_filter in _REGISTERED_DIRECT_FILTERS
+                if isinstance(custom_filter, plugin.Yuuk1ConversationCommandFilter)
+            },
+            {"jjctx_new", "jjctx_current", "jjctx_list", "jjctx_switch"},
+        )
+        self.assertEqual(
+            {
+                handler.__name__
+                for handler, scope in _REGISTERED_PERMISSIONS
+                if scope is permission_type.MEMBER
+            },
+            {"jjctx_new", "jjctx_current", "jjctx_list", "jjctx_switch"},
+        )
         self.assertEqual(len(command_group.custom_filters), 1)
         self.assertIsInstance(
             command_group.custom_filters[0], plugin.Yuuk1CommandAllowlistFilter
@@ -327,6 +373,8 @@ class AstrBotPluginRegistrationTests(unittest.TestCase):
                 self_id="synthetic-bot",
                 sender_name="测试群友",
                 platform_name="aiocqhttp",
+                platform_id="aiocqhttp",
+                astrbot_admin=False,
             ):
                 self.extras = {}
                 for name, value in (attributes or {}).items():
@@ -343,6 +391,8 @@ class AstrBotPluginRegistrationTests(unittest.TestCase):
                 self.self_id = self_id
                 self.sender_name = sender_name
                 self.platform_name = platform_name
+                self.platform_id = platform_id
+                self.astrbot_admin = astrbot_admin
                 self.request_llm_calls = 0
                 self.stopped = False
                 self._has_send_oper = False
@@ -352,6 +402,12 @@ class AstrBotPluginRegistrationTests(unittest.TestCase):
 
             def get_platform_name(self):
                 return self.platform_name
+
+            def is_private_chat(self):
+                return not bool(self.group_id)
+
+            def is_admin(self):
+                return self.astrbot_admin
 
             def get_group_id(self):
                 return self.group_id
@@ -363,7 +419,7 @@ class AstrBotPluginRegistrationTests(unittest.TestCase):
                 return self.self_id
 
             def get_platform_id(self):
-                return "aiocqhttp"
+                return self.platform_id
 
             def get_sender_name(self):
                 return self.sender_name
@@ -2553,6 +2609,229 @@ class AstrBotPluginRegistrationTests(unittest.TestCase):
             await identity_only_instance.terminate()
 
         asyncio.run(_exercise_plugin_hooks())
+
+        async def _exercise_conversation_commands():
+            class ScopedManager:
+                def __init__(self):
+                    self.umo = "napcat:GroupMessage:12345"
+                    self.old_id = "11111111-1111-4111-8111-111111111111"
+                    self.new_id = "22222222-2222-4222-8222-222222222222"
+                    self.created_id = "66666666-6666-4666-8666-666666666666"
+                    self.selected = self.new_id
+                    self.persisted = self.new_id
+                    self.calls = []
+                    self.create_calls = []
+                    self.records = [
+                        SimpleNamespace(
+                            cid=cid,
+                            user_id=self.umo,
+                            created_at=created,
+                            persona_id="persona-v1.1" if cid == self.new_id else None,
+                            history="PRIVATE_HISTORY_SENTINEL",
+                        )
+                        for cid, created in ((self.old_id, 100), (self.new_id, 200))
+                    ]
+
+                async def get_curr_conversation_id(self, umo):
+                    self.calls.append("current")
+                    assert umo == self.umo
+                    return self.selected
+
+                async def get_conversations(self, umo):
+                    self.calls.append("list")
+                    assert umo == self.umo
+                    return self.records
+
+                async def get_conversation(self, umo, cid):
+                    self.calls.append("detail")
+                    assert umo == self.umo
+                    return next((item for item in self.records if item.cid == cid), None)
+
+                async def switch_conversation(self, umo, cid):
+                    self.calls.append("switch")
+                    assert umo == self.umo
+                    self.selected = cid
+                    self.persisted = cid
+
+                async def new_conversation(self, umo, platform_id, *, persona_id=None):
+                    self.calls.append("new")
+                    assert umo == self.umo
+                    self.create_calls.append((umo, platform_id, persona_id))
+                    self.records.append(
+                        SimpleNamespace(
+                            cid=self.created_id,
+                            user_id=umo,
+                            created_at=300,
+                            persona_id=persona_id,
+                            history=[],
+                        )
+                    )
+                    self.selected = self.persisted = self.created_id
+                    return self.created_id
+
+                async def read_persisted(self, umo, key, default=None):
+                    raise AssertionError("cached session_get must not be used")
+
+                async def range_get_async(self, scope, umo, key):
+                    assert scope == "umo" and umo == self.umo and key == "sel_conv_id"
+                    return [
+                        SimpleNamespace(
+                            scope=scope,
+                            scope_id=umo,
+                            key=key,
+                            value={"val": self.persisted},
+                        )
+                    ]
+
+            manager = ScopedManager()
+            core.sp.range_get_async = manager.range_get_async
+            context = FakeContext()
+            context.conversation_manager = manager
+
+            async def resolve_persona(**_kwargs):
+                return "v1.1", {"name": "鲸鲸v1.1"}, None, False
+
+            context.persona_manager = SimpleNamespace(
+                resolve_selected_persona=resolve_persona
+            )
+            instance = plugin.Yuuk1CorePlugin(
+                context,
+                {
+                    "allowed_groups": ["12345"],
+                    "admin_users": ["900000002"],
+                    "owner_qq_id": "900000001",
+                },
+            )
+            instance._other_conversation_work_active = lambda _event: False
+
+            def napcat_event(**kwargs):
+                kwargs.setdefault("message_str", "jjctx current")
+                message = FakeEvent(platform_id="napcat", **kwargs)
+                message.unified_msg_origin = (
+                    f"napcat:GroupMessage:{message.get_group_id()}"
+                )
+                return message
+
+            denied_events = [
+                napcat_event(sender_id="ordinary"),
+                napcat_event(
+                    sender_id="impostor", sender_name="Yuuk1", astrbot_admin=True
+                ),
+                napcat_event(sender_id="900000001", astrbot_admin=True),
+                napcat_event(
+                    sender_id="900000002", astrbot_admin=True, group_id=""
+                ),
+                napcat_event(
+                    sender_id="900000002", astrbot_admin=True, group_id="54321"
+                ),
+                napcat_event(
+                    sender_id="900000002",
+                    astrbot_admin=True,
+                    platform_name="other-platform",
+                ),
+                FakeEvent(
+                    sender_id="900000002",
+                    astrbot_admin=True,
+                    message_str="jjctx current",
+                platform_id="napcat",
+                ),
+            ]
+            for denied in denied_events:
+                before = list(manager.calls)
+                for command, args in (
+                    (instance.jjctx_new, ()),
+                    (instance.jjctx_current, ()),
+                    (instance.jjctx_list, ()),
+                    (instance.jjctx_switch, (manager.old_id,)),
+                ):
+                    results = [item async for item in command(denied, *args)]
+                    assert results
+                    assert "仅限允许的 QQ 群" in results[0].chain[0].text
+                    assert manager.calls == before
+                assert manager.selected == manager.new_id
+
+            # Project authorization is sufficient; AstrBot global admin is not required.
+            admin = napcat_event(sender_id="900000002", astrbot_admin=False)
+            root_filter = conversation_group.custom_filters[0]
+            assert root_filter.filter(admin, {})
+            assert instance._can_manage_conversations(admin)
+            for denied in denied_events:
+                try:
+                    root_filter.filter(denied, {})
+                except ValueError as exc:
+                    assert "仅限允许的 QQ 群" in str(exc)
+                else:
+                    raise AssertionError("unauthorized command filter did not deny")
+                assert not denied.stopped
+            unrelated = napcat_event(sender_id="ordinary", message_str="yuuk1 status")
+            assert not root_filter.filter(unrelated, {})
+            assert not unrelated.stopped
+            similar_but_unregistered = napcat_event(
+                sender_id="ordinary", message_str="jjctxx current"
+            )
+            assert not root_filter.filter(similar_but_unregistered, {})
+            assert not similar_but_unregistered.stopped
+            isolated = napcat_event(sender_id="900000002")
+            isolated.extras["_session_isolated"] = True
+            isolated.unified_msg_origin = "napcat:GroupMessage:900000002_12345"
+            assert root_filter.filter(isolated, {})
+            assert instance._can_manage_conversations(isolated)
+            histories_before_create = {
+                item.cid: item.history for item in manager.records
+            }
+            created = [item async for item in instance.jjctx_new(admin)]
+            assert "旧历史仍保留" in created[0].chain[0].text
+            assert manager.selected == manager.persisted == manager.created_id
+            assert manager.create_calls == [
+                (manager.umo, "napcat", "persona-v1.1")
+            ]
+            assert {
+                item.cid: item.history
+                for item in manager.records
+                if item.cid in histories_before_create
+            } == histories_before_create
+            current = [item async for item in instance.jjctx_current(admin)]
+            current_text = current[0].chain[0].text
+            assert manager.created_id in current_text
+            assert "鲸鲸v1.1" in current_text
+            assert "PRIVATE_HISTORY_SENTINEL" not in current_text
+            listed = [item async for item in instance.jjctx_list(admin)]
+            list_text = listed[0].chain[0].text
+            assert (
+                manager.old_id in list_text
+                and manager.new_id in list_text
+                and manager.created_id in list_text
+            )
+            assert "PRIVATE_HISTORY_SENTINEL" not in list_text
+
+            switched = [
+                item async for item in instance.jjctx_switch(admin, manager.old_id[:8])
+            ]
+            assert "已切换" in switched[0].chain[0].text
+            assert manager.selected == manager.persisted == manager.old_id
+            switched_back = [
+                item async for item in instance.jjctx_switch(admin, manager.new_id)
+            ]
+            assert "已切换" in switched_back[0].chain[0].text
+            assert manager.selected == manager.persisted == manager.new_id
+            switched_created = [
+                item
+                async for item in instance.jjctx_switch(admin, manager.created_id)
+            ]
+            assert "已切换" in switched_created[0].chain[0].text
+            assert manager.selected == manager.persisted == manager.created_id
+            assert all(
+                item.history == "PRIVATE_HISTORY_SENTINEL"
+                for item in manager.records
+                if item.cid != manager.created_id
+            )
+            assert next(
+                item for item in manager.records if item.cid == manager.created_id
+            ).history == []
+            assert context.llm_calls == 0
+            await instance.terminate()
+
+        asyncio.run(_exercise_conversation_commands())
 
         client_registry: dict[str, object] = {}
         adapter = types.SimpleNamespace(

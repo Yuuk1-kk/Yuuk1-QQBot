@@ -66,6 +66,14 @@ notepad .env
 
 `owner_qq_id` 是鲸鲸的关系身份绑定，默认空；只按可信 QQ 平台当前事件的 sender ID 与该字符串匹配。Owner 身份不等于 `admin_users`，不会增加任何管理、系统或工具权限。要启用时，在 AstrBot WebUI 的“插件 → Yuuk1 Core 配置”中填写 Owner 的 QQ 号字符串并保存；本仓库不保存该运行值。
 
+### QQ 群 Conversation 管理 v1
+
+在允许的 QQ 群中，插件管理员可用 `/jjctx current` 查看当前 Conversation、`/jjctx list [page]` 分页列出本群记录、`/jjctx new` 创建并选中新 Conversation，或用 `/jjctx switch <完整 UUID 或唯一的至少 8 位十六进制前缀>` 切换到本群已有记录。新旧历史均保留。查看命令不输出消息正文，切换只接受当前群 UMO 所属的记录。
+
+`/jjctx` 要求当前事件来自允许的 OneBot QQ 群，且可信 sender ID 精确匹配插件 `admin_users`；不要求 AstrBot 全局管理员权限。Owner 人格关系不授予命令权限。切换不会清空 Free Talk 的内存上下文；热重载插件会清除该进程内缓存。切换前记录旧 Conversation ID 并按 [运维指南](docs/OPERATIONS.md) 备份，可便于恢复。
+
+Conversation Management v1 已在 AstrBot 运行时加载，并通过用户确认的真实 QQ E2E。AstrBot 原生 `/new` 仍使用 AstrBot 自身权限规则；项目维护者可使用 `/jjctx new`。
+
 ## 管理脚本
 
 | 脚本 | 作用 |

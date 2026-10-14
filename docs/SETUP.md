@@ -53,7 +53,7 @@ AstrBot WebUI → Plugins → Yuuk1 Core：
 
 - `allowed_groups`：填写允许 Bot 回应的 QQ 群号；留空时群聊默认不响应。
 - `allow_private_chat`：默认 `false`，QQ 私聊静默；只在明确需要时启用。
-- `admin_users`：填写可使用 `/yuuk1 status` 与 `/yuuk1 reset` 的 QQ 号。
+- `admin_users`：填写可使用 `/yuuk1 status`、`/yuuk1 reset` 与 `/jjctx` 群会话管理命令的 QQ 号。`/jjctx` 还要求可信 OneBot 发言事件来自 `allowed_groups` 中的群；它使用插件自己的精确管理员检查，不需要 AstrBot 全局管理员权限。Owner 关系本身不授予管理权限。
 - 默认用户级限流是每 QQ 用户每 60 秒 3 次，跨群与私聊共享；群级是每群每 60 秒 15 次。按需修改人格与两级限流后保存/重载插件。
 
 ## 7. 验证
@@ -64,3 +64,5 @@ AstrBot WebUI → Plugins → Yuuk1 Core：
 ```
 
 在白名单群中验证 @Bot 或回复 Bot 的原生唤醒、`/yuuk1 help`、管理员 `/yuuk1 status` 和 `/yuuk1 reset`。非白名单群和默认私聊应静默；普通成员不能重置共享群会话。单个用户快速请求应先命中用户额度，其他成员在群额度内仍能使用；群总量超过额度时所有成员暂时静默。真实 API 与 QQ 群行为在本人完成这些步骤前均为 **MANUAL VERIFICATION REQUIRED**。
+
+Conversation Management v1 的 `/jjctx current`、`/jjctx list [page]`、`/jjctx new` 和 `/jjctx switch <ID>` 仅供 `allowed_groups` 内、且 sender ID 命中 `admin_users` 的 QQ 账号使用。源码更新后须通过 AstrBot 支持的插件重载或重启加载，再在运行中的管理行为页面核验命令。首次切换前按 [运维指南](OPERATIONS.md) 记录旧 Conversation ID 并完成在线一致性备份，再由有权限的真实 QQ 账号手动测试新建与切换。

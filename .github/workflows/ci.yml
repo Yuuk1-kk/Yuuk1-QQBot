@@ -48,7 +48,7 @@ jobs:
           assert "aiocqhttp" in metadata["support_platforms"]
           assert (plugin / "main.py").is_file()
 
-          field_types = {"string": str, "text": str, "int": int, "bool": bool, "list": list}
+          field_types = {"string": str, "text": str, "int": int, "float": float, "bool": bool, "list": list}
           assert isinstance(schema, dict) and schema
           for name, field in schema.items():
               assert isinstance(field, dict), name
