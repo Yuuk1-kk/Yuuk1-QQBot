@@ -60,9 +60,19 @@ from .logic import (
     normalize_config,
 )
 from .multi_message import split_natural_messages
-from .owner_identity_reply import identity_reply, recognize_identity_question
+from .owner_identity_reply import (
+    identity_reply,
+    owner_response_correction,
+    recognize_identity_question,
+)
 from .presence import ManagedAsyncTask, idle_is_eligible
 from .relationship_memory import DATABASE_FILENAME, RelationshipMemoryStore
+from .reply_attribution import (
+    ReplyOrigin,
+    fetch_reply_origin,
+    recognize_reply_sender_question,
+    send_group_text_with_receipt,
+)
 from .stickers import (
     QQ_CUSTOM_IMAGE_SUB_TYPE,
     STICKER_CATEGORIES,
@@ -99,6 +109,23 @@ _OWNER_DIAGNOSTIC_STATE_ATTR = "_yuuk1_owner_diagnostic_state"
 _PENDING_STICKER_ATTR = "_yuuk1_pending_sticker"
 _STICKER_ONLY_SENT_ATTR = "_yuuk1_sticker_only_sent"
 _STICKER_SEND_FALLBACK_TEXT = "鲸鲸在这儿。"
+
+
+def _onebot_call_action(event: AstrMessageEvent) -> Any | None:
+    bot = getattr(event, "bot", None)
+    call_action = getattr(bot, "call_action", None)
+    if callable(call_action):
+        return call_action
+    call_action = getattr(getattr(bot, "api", None), "call_action", None)
+    return call_action if callable(call_action) else None
+
+
+def _source_event_message_id(event: AstrMessageEvent) -> str:
+    value = getattr(getattr(event, "message_obj", None), "message_id", None)
+    if isinstance(value, bool):
+        return ""
+    normalized = str(value or "").strip()
+    return normalized if normalized.lstrip("-").isdigit() else ""
 
 
 class _QQCustomStickerImageSegment(BaseMessageComponent):
@@ -728,11 +755,88 @@ class Yuuk1CorePlugin(Star):
     async def observe_owner_agent_done(
         self, event: AstrMessageEvent, run_context: object, response: object
     ) -> None:
-        """Observe Agent messages after context processing and completion."""
+        """Guard narrow identity contradictions, then observe Agent completion."""
+        try:
+            self._correct_owner_response(event, run_context, response)
+        except Exception:
+            logger.warning("Yuuk1 Owner response guard could not inspect completion.")
         try:
             self._owner_agent_boundary_diag(event, run_context, "agent_done")
         except Exception:
             return
+
+    def _correct_owner_response(
+        self, event: AstrMessageEvent, run_context: object, response: object
+    ) -> None:
+        """Keep a corrected plain reply and its assistant history in sync."""
+        if not self._is_allowed_context(event):
+            return
+        override = event.get_extra("enable_streaming")
+        if override is not None:
+            if bool(override):
+                return
+        else:
+            config = self.context.get_config(event.unified_msg_origin)
+            provider_settings = config.get("provider_settings", {})
+            if provider_settings.get("streaming_response") is not False:
+                return
+        if (
+            getattr(response, "role", None) != "assistant"
+            or getattr(response, "is_chunk", False)
+            or getattr(response, "reasoning_content", None)
+            or getattr(response, "reasoning_signature", None)
+            or getattr(response, "tools_call_name", None)
+            or getattr(response, "tools_call_args", None)
+            or getattr(response, "tools_call_ids", None)
+        ):
+            return
+        result_chain = getattr(response, "result_chain", None)
+        if result_chain is not None:
+            chain = getattr(result_chain, "chain", None)
+            if not isinstance(chain, list) or len(chain) != 1 or not isinstance(chain[0], Plain):
+                return
+        original = getattr(response, "completion_text", None)
+        messages = getattr(run_context, "messages", None)
+        if not isinstance(original, str) or not isinstance(messages, list) or not messages:
+            return
+        final_message = messages[-1]
+        content = getattr(final_message, "content", None)
+        if (
+            getattr(final_message, "role", None) != "assistant"
+            or not isinstance(content, list)
+            or len(content) != 1
+            or not isinstance(content[0], TextPart)
+            or content[0].text != original
+        ):
+            return
+        classification = classify_owner_identity(
+            event.get_platform_name(),
+            event.get_sender_id(),
+            self.settings.owner_qq_id,
+        )
+        components = getattr(getattr(event, "message_obj", None), "message", None)
+        correction = owner_response_correction(
+            components,
+            self_id=event.get_self_id(),
+            classification=classification,
+            response_text=original,
+            is_group=bool(event.get_group_id()),
+        )
+        if correction is None:
+            return
+        reason, replacement = correction
+        try:
+            response.completion_text = replacement
+            content[0].text = replacement
+        except Exception:
+            response.completion_text = original
+            content[0].text = original
+            raise
+        logger.warning(
+            "Yuuk1 corrected a bounded identity attribution; reason=%s classification=%s",
+            reason,
+            classification,
+        )
 
     def _should_collect_group_context(self) -> bool:
         return self.settings.free_talk_enabled or self.settings.idle_speak_enabled
@@ -1193,7 +1297,134 @@ class Yuuk1CorePlugin(Star):
             logger.error("Yuuk1 failed while checking a pending LLM request.")
             return
 
+        if await self._reply_to_quoted_sender_question(event):
+            return
         await self._reply_to_identity_question(event)
+
+    async def _reply_to_quoted_sender_question(
+        self,
+        event: AstrMessageEvent,
+    ) -> bool:
+        """Answer a direct quote-source question from verified OneBot metadata."""
+        group_id = event.get_group_id()
+        if (
+            not group_id
+            or not self._is_qq(event)
+            or not self._is_allowed_context(event)
+        ):
+            return False
+        components = getattr(getattr(event, "message_obj", None), "message", None)
+        try:
+            question = recognize_reply_sender_question(
+                components,
+                self_id=event.get_self_id(),
+            )
+        except Exception:
+            logger.debug("Yuuk1 quote attribution inspection failed.")
+            return False
+        if question is None:
+            return False
+
+        call_action = _onebot_call_action(event)
+        if call_action is None:
+            origin, reason = ReplyOrigin.UNKNOWN, "action_unavailable"
+        else:
+            origin, reason = await fetch_reply_origin(
+                call_action,
+                message_id=question.message_id,
+                current_group_id=group_id,
+                current_self_id=event.get_self_id(),
+                adapter_sender_id=question.adapter_sender_id,
+            )
+        if origin is ReplyOrigin.VERIFIED_BOT:
+            answer = "这条是我发的。"
+        elif origin is ReplyOrigin.VERIFIED_MEMBER:
+            answer = "这是群友发的。"
+        else:
+            answer = "这条引用我这边没法可靠核实来源，先不乱猜。"
+
+        # Never let a model guess authorship when the quote metadata is missing
+        # or inconsistent. The direct OneBot API result also supplies a message
+        # ID for the temporary, group-scoped bot record below.
+        event.stop_event()
+        sent_message_id = None
+        if call_action is not None:
+            try:
+                sent_message_id = await send_group_text_with_receipt(
+                    call_action,
+                    group_id=group_id,
+                    self_id=event.get_self_id(),
+                    text=answer,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Yuuk1 quote attribution reply send failed; exception_type=%s",
+                    type(exc).__name__,
+                )
+        else:
+            try:
+                await event.send(event.plain_result(answer))
+            except Exception as exc:
+                logger.warning(
+                    "Yuuk1 quote attribution reply send failed; exception_type=%s",
+                    type(exc).__name__,
+                )
+                return True
+            logger.debug(
+                "Yuuk1 quote attribution result=%s reason=%s; receipt_unavailable",
+                origin.value,
+                reason,
+            )
+            return True
+        if not sent_message_id:
+            logger.debug(
+                "Yuuk1 quote attribution result=%s reason=%s; send_unconfirmed",
+                origin.value,
+                reason,
+            )
+            return True
+        self._record_confirmed_group_reply(
+            event,
+            answer,
+            platform_message_id=sent_message_id,
+        )
+        logger.debug(
+            "Yuuk1 quote attribution result=%s reason=%s; reply_recorded",
+            origin.value,
+            reason,
+        )
+        return True
+
+    def _record_confirmed_group_reply(
+        self,
+        event: AstrMessageEvent,
+        text: str,
+        *,
+        platform_message_id: object,
+    ) -> None:
+        if not self._should_collect_group_context() or not event.get_group_id():
+            return
+        pending_engagement = bool(getattr(event, _ENGAGEMENT_PENDING_ATTR, False))
+        setattr(event, _ENGAGEMENT_PENDING_ATTR, False)
+        if not str(platform_message_id or "").strip():
+            logger.debug(
+                "Yuuk1 confirmed group reply has no platform receipt; context_not_recorded"
+            )
+            return
+        source_event_id = _source_event_message_id(event)
+        if not source_event_id:
+            logger.debug(
+                "Yuuk1 confirmed group reply has no source event id; context_not_recorded"
+            )
+            return
+        self._record_bot_reply(
+            event.unified_msg_origin,
+            member_key=str(getattr(event, _CURRENT_MEMBER_KEY_ATTR, "")),
+            text=text,
+            engage=bool(pending_engagement and self.settings.engagement_enabled),
+            source_event_id=source_event_id,
+            platform_message_id=platform_message_id,
+        )
 
     async def _reply_to_identity_question(self, event: AstrMessageEvent) -> None:
         """Finish an unambiguous QQ identity question before the Agent runs."""
@@ -1217,8 +1448,11 @@ class Yuuk1CorePlugin(Star):
         except Exception:
             classification = "unavailable"
         try:
+            sender_name = event.get_sender_name()
+            if isinstance(sender_name, str) and sender_name.strip() in {"N/A", "None"}:
+                sender_name = ""
             display_name = sanitize_display_name(
-                event.get_sender_name(),
+                sender_name,
                 forbidden_values=(event.get_sender_id(),),
             )
         except Exception:
@@ -1236,23 +1470,58 @@ class Yuuk1CorePlugin(Star):
         # The stop flag is independent of the result and prevents the normal
         # Agent request even if the platform send fails or has an unknown result.
         event.stop_event()
-        try:
-            await event.send(event.plain_result(reply))
-        except Exception:
-            logger.warning("Yuuk1 identity reply delivery failed.")
-            return
-        pending_engagement = bool(getattr(event, _ENGAGEMENT_PENDING_ATTR, False))
-        setattr(event, _ENGAGEMENT_PENDING_ATTR, False)
-        if self._should_collect_group_context() and event.get_group_id():
+        if event.get_group_id():
+            call_action = _onebot_call_action(event)
+            sent_message_id = None
             try:
-                self._record_bot_reply(
-                    event.unified_msg_origin,
-                    member_key=str(getattr(event, _CURRENT_MEMBER_KEY_ATTR, "")),
-                    text=reply,
-                    engage=bool(pending_engagement and self.settings.engagement_enabled),
+                if call_action is not None:
+                    sent_message_id = await send_group_text_with_receipt(
+                        call_action,
+                        group_id=event.get_group_id(),
+                        self_id=event.get_self_id(),
+                        text=reply,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "Yuuk1 identity reply delivery failed; exception_type=%s",
+                    type(exc).__name__,
+                )
+                return
+            if call_action is None:
+                try:
+                    await event.send(event.plain_result(reply))
+                except Exception as exc:
+                    logger.warning(
+                        "Yuuk1 identity reply delivery failed; exception_type=%s",
+                        type(exc).__name__,
+                    )
+                    return
+                logger.debug(
+                    "Yuuk1 identity reply has no platform receipt; context_not_recorded"
+                )
+                return
+            if not sent_message_id:
+                logger.warning(
+                    "Yuuk1 identity reply send was not confirmed; context_not_recorded"
+                )
+                return
+            try:
+                self._record_confirmed_group_reply(
+                    event,
+                    reply,
+                    platform_message_id=sent_message_id,
                 )
             except Exception:
                 logger.warning("Yuuk1 identity reply context update failed.")
+            return
+
+        try:
+            await event.send(event.plain_result(reply))
+        except Exception as exc:
+            logger.warning(
+                "Yuuk1 identity reply delivery failed; exception_type=%s",
+                type(exc).__name__,
+            )
 
     @filter.on_llm_request()
     async def customize_request(
@@ -1311,6 +1580,8 @@ class Yuuk1CorePlugin(Star):
             # This observes only the incoming request system prompt. It does not
             # claim to inspect Conversation history or the Provider payload.
             request_context_isolated = "<trusted_identity_policy>" not in existing
+            if not request_context_isolated or "</trusted_identity_policy>" in existing:
+                raise RuntimeError("Preexisting Owner policy in request")
             req.system_prompt = f"{existing}\n\n{addition}" if existing else addition
             identity_status = classify_owner_identity(
                 event.get_platform_name(),
@@ -1907,6 +2178,7 @@ class Yuuk1CorePlugin(Star):
                     getattr(event, _ENGAGEMENT_PENDING_ATTR, False)
                     and self.settings.engagement_enabled
                 ),
+                source_event_id=_source_event_message_id(event),
             )
             return
 
@@ -1964,6 +2236,7 @@ class Yuuk1CorePlugin(Star):
         pending_text_parts = getattr(event, _PENDING_TEXT_PARTS_ATTR, None)
         setattr(event, _PENDING_TEXT_PARTS_ATTR, None)
         text_parts_sent = True
+        delivered_followup_parts: list[str] = []
         if isinstance(pending_text_parts, list):
             for part in pending_text_parts:
                 await asyncio.sleep(0.45)
@@ -1980,6 +2253,7 @@ class Yuuk1CorePlugin(Star):
                     logger.warning("Yuuk1 follow-up text target was unavailable.")
                     text_parts_sent = False
                     break
+                delivered_followup_parts.append(part)
 
         pending_path = getattr(event, _PENDING_STICKER_ATTR, None)
         setattr(event, _PENDING_STICKER_ATTR, None)
@@ -2039,11 +2313,12 @@ class Yuuk1CorePlugin(Star):
             )
             full_reply_text = getattr(event, _FULL_REPLY_TEXT_ATTR, None)
             setattr(event, _FULL_REPLY_TEXT_ATTR, None)
-            reply_text = (
-                full_reply_text
-                if isinstance(full_reply_text, str) and full_reply_text
-                else result_text
-            )
+            if text_parts_sent and isinstance(full_reply_text, str) and full_reply_text:
+                reply_text = full_reply_text
+            else:
+                reply_text = "\n".join(
+                    part for part in (result_text, *delivered_followup_parts) if part
+                )
             self._record_bot_reply(
                 event.unified_msg_origin,
                 member_key=str(getattr(event, _CURRENT_MEMBER_KEY_ATTR, "")),
@@ -2053,6 +2328,7 @@ class Yuuk1CorePlugin(Star):
                     and whole_turn_succeeded
                     and self.settings.engagement_enabled
                 ),
+                source_event_id=_source_event_message_id(event),
             )
         elif not whole_turn_succeeded and pending_engagement:
             logger.debug("Yuuk1 Free Talk skipped; reason=delivery_incomplete")
@@ -2122,7 +2398,9 @@ class Yuuk1CorePlugin(Star):
         member_key: str = "",
         text: object = "",
         engage: bool = False,
-    ) -> None:
+        source_event_id: object = "",
+        platform_message_id: object = "",
+    ) -> bool:
         now = time.monotonic()
         was_engaged, _ = self.group_context.engagement_status(
             session,
@@ -2130,19 +2408,24 @@ class Yuuk1CorePlugin(Star):
             enabled=self.settings.engagement_enabled,
             timeout_seconds=self.settings.engagement_timeout_seconds,
         )
-        self.group_context.record_bot_reply(
+        recorded = self.group_context.record_bot_reply(
             session,
             timestamp=time.time(),
             now=now,
             text=text,
             member_key=member_key,
             engage=engage,
+            source_event_id=source_event_id,
+            platform_message_id=platform_message_id,
         )
+        if recorded is None:
+            return False
         if engage:
             logger.debug(
                 "Yuuk1 Free Talk engagement_%s",
                 "refreshed" if was_engaged else "entered",
             )
+        return True
 
     async def _idle_presence_loop(self) -> None:
         """Check observed, allowed sessions; never retain a raw event in this task."""

@@ -4,6 +4,7 @@
 !.env.example
 /data/
 /backups/
+/docs/persona-calibration/
 **/napcat/config/
 **/napcat/qq/
 *.session

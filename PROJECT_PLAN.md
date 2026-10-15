@@ -19,6 +19,8 @@
 Group Identity Context v1 是当前 v0.1 stabilization 范围内的身份/名称上下文，不是跨用户画像或长期个人记忆。
 
 - Owner Identity v1 — VERIFIED（确定性身份问答 QQ E2E）：用户确认部署后完整真实 QQ E2E 全部通过。明确且直接面向鲸鲸的身份问答由当前可信 QQ sender ID 分类决定答复，避免 LLM 自行判断主人身份；未命中的自由聊天继续走原模型流程。昵称、自称、@、引用和共享历史不参与认证；不注入原始 QQ 号，不修改全局 Persona 或管理员权限。Owner 诊断默认关闭，当前运行配置已为 false。此验收保证范围限于规则识别到的明确身份问答。
+- Owner Identity v1.1 — LOCAL FIX / PENDING QQ E2E：补充自然说法的明确身份问答、姓名展示与主人认证的分离；为少量明确的主人关系事实矛盾增加受限回复保护，并修正 Free Talk 中机器人与同名群友的标签冲突。不会强制接受普通称呼请求。此前 v1 确定性问答通过记录不等于自由聊天已稳定。
+- Owner Identity v1.1.1 — RUNTIME UPDATED / QQ E2E PARTIAL：引用发言归属改为模型请求前的 OneBot `get_msg` 核验；仅在原消息 ID、群、消息类型及发送者数据一致时回答，其他情况保守标为 UNKNOWN。确定性群回复只有获得 OneBot 发送消息 ID 才进入临时 Free Talk 上下文，并以哈希键关联来源事件以防重复；不写入 AstrBot Conversation。用户已手动热重载，并确认新 Conversation 下 Owner 关系与机器人确定性回复引用测试表现正常；其他 QQ 场景尚未完全验证。
 - Relationship Memory Store Foundation — IMPLEMENTED / LOCALLY VERIFIED：使用标准库 SQLite 存放由 Group Identity HMAC 键限定的事实记录，支持事务 CRUD、版本替换和清除正文的删除。完整 Relationship Memory v1 尚未完成；Memory Injection 与 Controlled Memory Writing 均未开始。
 
 - 主动参与概率

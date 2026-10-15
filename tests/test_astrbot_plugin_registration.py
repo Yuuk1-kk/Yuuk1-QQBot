@@ -484,6 +484,7 @@ class AstrBotPluginRegistrationTests(unittest.TestCase):
             def get_config(self, *_):
                 return {
                     "platform": [],
+                    "provider_settings": {"streaming_response": False},
                 }
 
             def get_platform_inst(self, _):
@@ -1124,6 +1125,17 @@ class AstrBotPluginRegistrationTests(unittest.TestCase):
             assert "主人" in await deterministic_turn(
                 "900000001", "Yuuk1", "鲸鲸，我和你是什么关系？"
             )
+            natural_who_reply = await deterministic_turn(
+                "900000001", "改过的昵称", "鲸鲸，你看看我是谁呢？"
+            )
+            assert "Yuuk1" in natural_who_reply and "改过的昵称" not in natural_who_reply
+            assert "主人" not in await deterministic_turn(
+                "900000002", "Yuuk1", "鲸鲸，你看看我是谁呢？"
+            )
+            display_name_reply = await deterministic_turn(
+                "900000001", "老大", "鲸鲸，那你看看我名字呢？"
+            )
+            assert "老大" in display_name_reply and "主人" not in display_name_reply
             concurrent_texts = await asyncio.gather(
                 deterministic_turn("900000001", "奶龙鉴赏家", "鲸鲸，我是谁？"),
                 deterministic_turn("900000002", "Yuuk1", "鲸鲸，我是谁？"),
@@ -1131,9 +1143,13 @@ class AstrBotPluginRegistrationTests(unittest.TestCase):
             assert concurrent_texts[0] != concurrent_texts[1]
             assert "Yuuk1" in concurrent_texts[0]
             assert "你现在叫Yuuk1" in concurrent_texts[1]
+            # The lightweight fake event has no OneBot send receipt or source
+            # message ID, so deterministic replies must not be invented as
+            # confirmed bot history. The v4.28.2 runtime test covers the
+            # receipt-backed recording path.
             assert deterministic.group_context.last_bot_turn_text(
                 "aiocqhttp:GroupMessage:12345"
-            ) == concurrent_texts[1]
+            ) == ""
 
             for components in (
                 [_Plain("鲸鲸，你是谁？")],
@@ -1145,6 +1161,51 @@ class AstrBotPluginRegistrationTests(unittest.TestCase):
                 await deterministic.guard_qq_request(ordinary)
                 assert not ordinary.is_stopped()
                 assert ordinary.sent_messages == []
+
+            async def completed_text(sender, prompt, generated, *, components=None, streaming=False):
+                event = identity_event(sender, "Yuuk1", prompt, components=components)
+                if streaming:
+                    event.set_extra("enable_streaming", True)
+                response = SimpleNamespace(role="assistant", completion_text=generated)
+                assistant = SimpleNamespace(role="assistant", content=[_TextPart(generated)])
+                run_context = SimpleNamespace(messages=[assistant])
+                await deterministic.observe_owner_agent_done(event, run_context, response)
+                assert assistant.content[0].text == response.completion_text
+                return response.completion_text
+
+            assert "Yuuk1" in await completed_text(
+                "900000001",
+                "以后在群里叫我老大",
+                "真要是主人，我自然会认。",
+            )
+            corrected_non_owner = await completed_text(
+                "900000002",
+                "你看看我是谁呢",
+                "你就是鲸鲸的主人！",
+            )
+            assert "咱们是群友" in corrected_non_owner
+            assert "主人" in await completed_text(
+                "900000001", "你看看我是谁呢", "你不是我的主人。"
+            )
+            assert await completed_text(
+                "900000002", "读一遍我的名字", "你现在叫 Yuuk1 呀。"
+            ) == "你现在叫 Yuuk1 呀。"
+            quoted_bot = type("Reply", (), {"sender_id": "synthetic-bot"})()
+            # A Reply component by itself has no reliable resolution status.
+            # Quote authorship is handled before Agent execution by the
+            # receipt-backed OneBot get_msg path, not by rewriting completion.
+            assert await completed_text(
+                "900000002",
+                "这句是你说的吗？",
+                "那句话不是我说的。",
+                components=[quoted_bot, _Plain("这句是你说的吗？")],
+            ) == "那句话不是我说的。"
+            assert await completed_text(
+                "900000001",
+                "以后在群里叫我老大",
+                "你不是我的主人。",
+                streaming=True,
+            ) == "你不是我的主人。"
             unknown_delivery = identity_event(
                 "900000002", "Yuuk1", "鲸鲸，我是你的主人吗？"
             )
@@ -1534,8 +1595,7 @@ class AstrBotPluginRegistrationTests(unittest.TestCase):
                 "verified_owner",
             ) == (1, "absent", False, False, False)
 
-            # A reused request prompt is observable without logging either
-            # policy text or any account identity.
+            # A preexisting policy cannot be combined with this sender's policy.
             reused_prompt_request = SimpleNamespace(
                 system_prompt=diagnostic_request.system_prompt,
                 extra_user_content_parts=[],
@@ -1550,10 +1610,13 @@ class AstrBotPluginRegistrationTests(unittest.TestCase):
                 for _, message in log_records[reused_log_start:]
                 if "owner identity diagnostic" in message.lower()
             ]
-            assert len(reused_lines) == 1
-            assert "identity_classification=verified_non_owner" in reused_lines[0]
-            assert "request_context_isolated=False" in reused_lines[0]
-            assert "identity_context_injected=False" in reused_lines[0]
+            assert reused_lines == []
+            assert diagnostic_non_owner_event.is_stopped()
+            assert reused_prompt_request.system_prompt.count("<trusted_identity_policy>") == 1
+            assert any(
+                "failed while preparing the request policy" in message
+                for _, message in log_records[reused_log_start:]
+            )
 
             unconfigured_diagnostic_instance = plugin.Yuuk1CorePlugin(
                 context,

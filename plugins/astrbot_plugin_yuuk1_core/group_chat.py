@@ -138,7 +138,7 @@ _MAX_MESSAGE_CHARS = 1000
 
 @dataclass(frozen=True, slots=True)
 class GroupMessage:
-    """A redacted, in-memory message summary; it never carries platform IDs."""
+    """A redacted, in-memory message summary without raw platform IDs."""
 
     timestamp: float
     sender: str
@@ -151,6 +151,8 @@ class GroupMessage:
     reply_target_member_key: str = field(default="", repr=False)
     reply_target_display_name: str = ""
     received_monotonic: float = field(default=0.0, repr=False)
+    source_event_key: str = field(default="", repr=False)
+    platform_message_key: str = field(default="", repr=False)
 
     def as_prompt_dict(self) -> dict[str, object]:
         return {
@@ -519,6 +521,19 @@ class GroupContextBuffer:
             digest_size=16,
         ).hexdigest()
 
+    def _message_link_key(self, session: str, kind: str, value: object) -> str:
+        raw_value = str(value or "").strip()
+        if not raw_value or len(raw_value) > 32:
+            return ""
+        if not re.fullmatch(r"-?\d+", raw_value):
+            return ""
+        payload = f"yuuk1:{kind}:{session}:{raw_value}".encode()
+        return hashlib.blake2b(
+            payload,
+            key=self._alias_salt,
+            digest_size=16,
+        ).hexdigest()
+
     def record_message(
         self,
         session: str,
@@ -569,24 +584,36 @@ class GroupContextBuffer:
         text: object = "",
         member_key: str = "",
         engage: bool = False,
-    ) -> None:
+        source_event_id: object = "",
+        platform_message_id: object = "",
+    ) -> GroupMessage | None:
         state = self._state(session, create=False)
         if state is None:
-            return
+            return None
         self._prune_messages(state, now)
-        safe_text = sanitize_text(text) or "[鲸鲸刚刚回复过]"
-        state.messages.append(
-            GroupMessage(
-                timestamp=timestamp,
-                sender="鲸鲸",
-                text=safe_text,
-                mentions_jingjing=False,
-                at_bot=False,
-                is_bot=True,
-                member_key="bot",
-                received_monotonic=now,
-            )
+        source_event_key = self._message_link_key(
+            session, "source-event", source_event_id
         )
+        if source_event_key and any(
+            message.source_event_key == source_event_key for message in state.messages
+        ):
+            return None
+        safe_text = sanitize_text(text) or "[鲸鲸刚刚回复过]"
+        message = GroupMessage(
+            timestamp=timestamp,
+            sender="鲸鲸",
+            text=safe_text,
+            mentions_jingjing=False,
+            at_bot=False,
+            is_bot=True,
+            member_key="bot",
+            received_monotonic=now,
+            source_event_key=source_event_key,
+            platform_message_key=self._message_link_key(
+                session, "platform-message", platform_message_id
+            ),
+        )
+        state.messages.append(message)
         state.last_bot_human_count = state.human_count
         if engage:
             state.last_engaged_at = now
@@ -594,6 +621,7 @@ class GroupContextBuffer:
             state.last_bot_turn_text = safe_text
             state.last_bot_turn_timestamp = timestamp
             state.last_bot_turn_received_monotonic = now
+        return message
 
     def engagement_status(
         self,
@@ -771,46 +799,62 @@ def format_context(
 
     labels: dict[str, str] = {}
     used_tags: set[str] = set()
+    bot_name = normalize_display_name("鲸鲸")
+
+    def human_label(
+        member_key: str, display_name: object, *, force_tag: bool = False
+    ) -> str:
+        if member_key and member_key in labels:
+            return labels[member_key]
+        safe_name = sanitize_display_name(display_name) or "群友"
+        normalized = normalize_display_name(safe_name)
+        reserved_bot_name = normalized == bot_name
+        base = f"群友（昵称：{safe_name}）" if reserved_bot_name else safe_name
+        needs_tag = (
+            len(name_members.get(normalized, ())) > 1
+            or member_key in duplicate_member_keys
+            or reserved_bot_name
+            or force_tag
+        )
+        label = (
+            f"{base}#{_short_member_tag(member_key, used_tags)}"
+            if member_key and needs_tag
+            else base
+        )
+        if member_key:
+            labels[member_key] = label
+        return label
+
     for message in messages:
         if message.is_bot:
             continue
-        member_key = message.member_key
-        if member_key and member_key in labels:
-            continue
-        normalized = normalize_display_name(message.sender)
-        duplicate_in_context = len(name_members.get(normalized, ())) > 1
-        if member_key and (duplicate_in_context or member_key in duplicate_member_keys):
-            labels[member_key] = (
-                f"{sanitize_display_name(message.sender) or '群友'}"
-                f"#{_short_member_tag(member_key, used_tags)}"
-            )
-        elif member_key and member_key in labels:
-            continue
-        elif member_key:
-            labels[member_key] = sanitize_display_name(message.sender) or "群友"
+        human_label(message.member_key, message.sender)
 
     lines: list[str] = []
     for message in messages:
         if message.is_bot:
             label = "鲸鲸"
         else:
-            label = labels.get(message.member_key, sanitize_display_name(message.sender) or "群友")
+            label = human_label(message.member_key, message.sender)
         # Keep each transcript entry on one line so user supplied newlines
         # cannot forge additional [speaker] records in the temporary prompt.
         text = " ".join(sanitize_text(message.text).split())
         if message.reply_target_display_name:
-            target = sanitize_display_name(message.reply_target_display_name) or "群友"
             target_key = message.reply_target_member_key
-            target_name_members = name_members.get(normalize_display_name(target), set())
-            if (
-                target_key
-                and target_key != "bot"
-                and target_name_members
-                and (target_key not in target_name_members or len(target_name_members) > 1)
-            ):
-                target = f"{target}#{_short_member_tag(target_key, used_tags)}"
-            elif target == "群友" and target_key and target_key != "bot":
-                target = f"{target}#{_short_member_tag(target_key, used_tags)}"
+            target_name = sanitize_display_name(message.reply_target_display_name) or "群友"
+            target_members = name_members.get(normalize_display_name(target_name), set())
+            target = (
+                "鲸鲸"
+                if target_key == "bot"
+                else human_label(
+                    target_key,
+                    target_name,
+                    force_tag=bool(
+                        target_key
+                        and (target_key not in target_members or target_name == "群友")
+                    ),
+                )
+            )
             text = f"回复 [{target}]：{text}"
         lines.append(f"[{label}] {text}")
     return "\n".join(lines)

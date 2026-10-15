@@ -330,6 +330,63 @@ def test_engagement_context_keeps_latest_bot_turn_past_general_context_ttl() -> 
     assert selected[0].text == "在，怎么了？"
 
 
+def test_confirmed_bot_reply_is_group_scoped_and_source_event_idempotent() -> None:
+    context = GroupContextBuffer(max_messages=8, ttl_seconds=900)
+    first_session = "qq:group:first"
+    second_session = "qq:group:second"
+    for session in (first_session, second_session):
+        context.record_message(
+            session,
+            sender_key="synthetic-owner",
+            display_name="鲸鲸",
+            text="synthetic question",
+            timestamp=1,
+            now=1,
+        )
+
+    first = context.record_bot_reply(
+        first_session,
+        timestamp=2,
+        now=2,
+        text="verified reply",
+        source_event_id="700000001",
+        platform_message_id="700000002",
+    )
+    duplicate = context.record_bot_reply(
+        first_session,
+        timestamp=3,
+        now=3,
+        text="duplicate reply",
+        source_event_id="700000001",
+        platform_message_id="700000002",
+    )
+    other_group = context.record_bot_reply(
+        second_session,
+        timestamp=3,
+        now=3,
+        text="other group reply",
+        source_event_id="700000001",
+        platform_message_id="700000002",
+    )
+
+    assert first is not None and first.is_bot
+    assert duplicate is None
+    assert other_group is not None and other_group.is_bot
+    assert [item.text for item in context.recent(first_session, now=3)] == [
+        "synthetic question",
+        "verified reply",
+    ]
+    assert [item.text for item in context.recent(second_session, now=3)] == [
+        "synthetic question",
+        "other group reply",
+    ]
+    assert first.source_event_key and first.platform_message_key
+    assert "700000001" not in repr(first)
+    assert "700000002" not in repr(first)
+    assert "source_event_key" not in first.as_prompt_dict()
+    assert "platform_message_key" not in first.as_prompt_dict()
+
+
 def test_engagement_relevance_uses_reply_and_continuation_without_losing_context() -> None:
     context = GroupContextBuffer(max_messages=30, ttl_seconds=900)
     session = "qq:group:allowed"
@@ -537,6 +594,55 @@ def test_speaker_context_and_reply_names_do_not_expose_platform_ids() -> None:
     assert not contains_flattened_at_id("@群友")
     assert sanitize_flattened_message_text("@偷摸零🐧(987654321) 你好") == "@偷摸零🐧 你好"
     assert sanitize_flattened_message_text("@987654321(987654321)") == "@群友"
+
+
+def test_bot_name_is_reserved_in_temporary_group_context() -> None:
+    member_key = "member_" + "a" * 64
+    messages = (
+        GroupMessage(
+            timestamp=1,
+            sender="鲸鲸",
+            text="群友的话",
+            mentions_jingjing=False,
+            at_bot=False,
+            member_key=member_key,
+        ),
+        GroupMessage(
+            timestamp=2,
+            sender="鲸鲸",
+            text="机器人回复",
+            mentions_jingjing=False,
+            at_bot=False,
+            is_bot=True,
+            member_key="bot",
+        ),
+        GroupMessage(
+            timestamp=3,
+            sender="群友",
+            text="引用群友",
+            mentions_jingjing=False,
+            at_bot=False,
+            member_key="member_" + "b" * 64,
+            reply_target_member_key=member_key,
+            reply_target_display_name="鲸鲸",
+        ),
+        GroupMessage(
+            timestamp=4,
+            sender="群友",
+            text="引用机器人",
+            mentions_jingjing=False,
+            at_bot=False,
+            member_key="member_" + "b" * 64,
+            reply_target_member_key="bot",
+            reply_target_display_name="鲸鲸",
+        ),
+    )
+    rendered = format_context(messages)
+    assert "[群友（昵称：鲸鲸）#AAAA] 群友的话" in rendered
+    assert "[鲸鲸] 机器人回复" in rendered
+    assert "回复 [群友（昵称：鲸鲸）#AAAA]" in rendered
+    assert "回复 [鲸鲸]" in rendered
+    assert "[鲸鲸] 群友的话" not in rendered
 
 
 def test_context_renderer_flattens_newlines_inside_user_messages() -> None:
